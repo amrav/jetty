@@ -1,4 +1,4 @@
-"""Module discovery and enable/disable (SPEC.md §4.4, §5).
+"""Module discovery and enable/disable (SPEC.md §4.3, §5).
 
 Two rules make "modular" mean something here:
 

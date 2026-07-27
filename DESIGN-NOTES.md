@@ -10,9 +10,7 @@ If this file and the spec disagree, the spec wins and this file is stale.
 
 ---
 
-## Liveness and readiness are separate endpoints
-
-`/healthz` performs no upstream checks; `/readyz` does.
+## `/healthz` reports liveness only
 
 A path named `healthz` gets wired to a container liveness probe. If it reported
 upstream reachability, a directory outage would restart every sidecar in the
@@ -20,8 +18,11 @@ fleet at once. Restarting a stateless sidecar cannot repair a remote
 dependency — it only destroys the component that was correctly reporting the
 fault, and converts a partial outage into a crash-loop.
 
-`/readyz` caches results briefly so that a fleet of frequent probes cannot
-amplify into load on the directory it is checking.
+An earlier revision paired it with a `/readyz` readiness probe that did check
+upstreams. That was removed along with the per-module readiness contract: it is
+the client's `5xx` handling (§1.2) that has to be correct either way, and a
+readiness endpoint that a load balancer acts on is a second, weaker copy of the
+same signal. A caller learns an upstream is down by calling it.
 
 ## The error envelope has a closed code set
 
@@ -35,22 +36,6 @@ a status-to-behaviour table that drifts from this one.
 permitted to parse becomes frozen; keeping the human-readable field explicitly
 unstable preserves the freedom to improve it.
 
-## Limits state what they count
-
-"512 groups" and "512 *distinct* groups" differ for any client that does not
-deduplicate. "256 characters" and "256 bytes" differ for any non-ASCII
-identifier. Both ambiguities are easy to read past and produce implementations
-that disagree only on inputs nobody tests.
-
-Exceeding a limit is an error rather than a truncation because a truncated
-authorization answer is indistinguishable from a negative one. It reads as
-"access denied" — which looks like correct behaviour — until the day the dropped
-entry was the one that would have granted access.
-
-Group *member* enumeration is allowed to be partial because there the response
-is inherently large, not the question. The `truncated` flag is what keeps that
-from being a silent lie, which is why it is required to be honest rather than
-merely present.
 
 ## Clients forward every header; the sidecar selects
 
@@ -139,14 +124,15 @@ disabled.
 ## Transport authority
 
 Reaching the sidecar is itself a privilege, because it answers questions about
-who holds which group. An unauthenticated TCP listener that will say whether a
-named user is an administrator is a useful primitive for anything else running
-on the host.
+who holds which group. Unix sockets are therefore the default: filesystem
+permissions serve as the access control, and no token has to be distributed or
+rotated.
 
-Unix sockets are the default so that filesystem permissions serve as the access
-control and no token has to be distributed. TCP requires a token, and a
-non-loopback bind requires an explicit opt-in so that it cannot happen by
-copying a config.
+The protocol defines no transport authentication for TCP. A TCP listener is
+consequently reachable by any process that can reach the bound address, which
+is why a non-loopback bind requires an explicit opt-in rather than happening by
+copying a config. Deployments that need TCP and cannot accept that should place
+the sidecar behind something that does enforce it.
 
 ## Implementation notes
 

@@ -1,4 +1,4 @@
-"""Forwarded-header container and wire parsing (SPEC.md §3.5)."""
+"""Forwarded-header container and wire parsing (SPEC.md §3.2)."""
 
 from __future__ import annotations
 
@@ -6,11 +6,8 @@ import pytest
 
 from jetty.headers import DuplicateHeaderError, Headers
 
-LIMITS = {"max_entries": 128, "max_bytes": 64 * 1024}
-
-
-def parse(raw: object, **over: int) -> Headers:
-    return Headers.from_wire(raw, **{**LIMITS, **over})
+def parse(raw: object) -> Headers:
+    return Headers.from_wire(raw)
 
 
 # ------------------------------------------------------------ duplicates
@@ -25,7 +22,7 @@ def test_duplicates_are_preserved_not_collapsed():
 
 
 def test_sole_raises_on_a_duplicated_header():
-    """A driver must not be able to silently pick a winner (SPEC.md §3.5)."""
+    """A driver must not be able to silently pick a winner (SPEC.md §3.2)."""
     h = parse([["x-corp-user", "alice"], ["x-corp-user", "mallory"]])
     with pytest.raises(DuplicateHeaderError) as e:
         h.sole("x-corp-user")
@@ -72,7 +69,7 @@ def test_empty_is_valid():
     assert h.sole("anything") is None
 
 
-# ------------------------------------------------------------ limits & shape
+# ------------------------------------------------------------------- shape
 
 
 def test_rejects_an_object_instead_of_pairs():
@@ -101,26 +98,10 @@ def test_rejects_malformed_entries(bad):
         parse(bad)
 
 
-def test_rejects_too_many_headers():
-    raw = [[f"x-{i}", "v"] for i in range(200)]
-    with pytest.raises(ValueError, match="too many headers"):
-        parse(raw, max_entries=128)
-    assert len(parse(raw[:128], max_entries=128)) == 128
 
 
-def test_rejects_oversized_headers():
-    """A multi-KiB Cookie is normal once every header is forwarded."""
-    raw = [["cookie", "x" * 100_000]]
-    with pytest.raises(ValueError, match="too large"):
-        parse(raw)
 
 
-def test_limit_errors_do_not_leak_header_values():
-    """SPEC.md §1.4 — any forwarded header may be a credential."""
-    secret = "super-secret-token-value"
-    with pytest.raises(ValueError) as e:
-        parse([["x-token", secret]], max_bytes=4)
-    assert secret not in str(e.value)
 
 
 def test_repr_never_contains_values():
@@ -130,8 +111,6 @@ def test_repr_never_contains_values():
     assert "x-corp-token" in repr(h)
 
 
-def test_byte_size_counts_names_and_values():
-    assert parse([["ab", "cde"]]).byte_size() == 5
 
 
 def test_wire_roundtrip():

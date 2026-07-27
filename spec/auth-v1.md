@@ -1,6 +1,6 @@
 # Jetty module: `auth` — v1
 
-Mount: `/auth/v1` on the control listener · `required: true` by default
+Mount: `/auth/v1` on the control listener
 Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
 The `auth` module resolves two things:
@@ -51,18 +51,18 @@ specification.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `headers` | array of `[name, value]` | yes | Every header the client received, verbatim and unfiltered (SPEC.md §3.5). Lowercased names, order preserved, duplicates retained. Limits per SPEC.md §3.4. |
+| `headers` | array of `[name, value]` | yes | Every header the client received, verbatim and unfiltered (SPEC.md §3.2). Lowercased names, order preserved, duplicates retained. |
 | `groups` | string[] | no, default `[]` | Group identifiers to check. |
 
 An implementation **MUST NOT** offer configuration that selects which headers
-the client sends (SPEC.md §3.5.1). Selecting the credential from the forwarded
+the client sends (SPEC.md §3.2.1). Selecting the credential from the forwarded
 set is the driver's responsibility.
 
 `headers` **MUST** be present. An absent `headers` key is `400 invalid_request`.
 An empty array is valid and denotes that the client received no headers.
 
 If a header the driver selects for authentication appears more than once, the
-request **MUST** fail `401` (SPEC.md §3.5.3).
+request **MUST** fail `401` (SPEC.md §3.2.3).
 
 ### Response `200`
 
@@ -99,7 +99,7 @@ The `groups` map obeys four rules:
 | Status | `code` | When |
 |---|---|---|
 | 401 | `unauthenticated` | Headers absent, malformed, expired, or failing validation. |
-| 400 | `invalid_request` | Missing `headers`, wrong types, or limits exceeded. |
+| 400 | `invalid_request` | Missing `headers` or wrong types. |
 | 503 | `upstream_unavailable` | Directory unreachable or timed out. |
 
 A `401` **MUST NOT** evaluate group membership, and its body **MUST NOT**
@@ -111,7 +111,7 @@ An implementation **MUST NOT** derive an identity from any header it has not
 verified. A request whose headers assert a username without an accompanying
 token, signature, or assertion **MUST** return `401`.
 
-Because the client forwards every header it received (SPEC.md §3.5.1), the
+Because the client forwards every header it received (SPEC.md §3.2.1), the
 forwarded set includes headers under end-user control. The presence of a header
 therefore confers no authority. A driver **MUST** treat the forwarded set as
 untrusted input from which a credential is verified.
@@ -150,7 +150,7 @@ map identical to the one `identify` returns.
 | Status | `code` | When |
 |---|---|---|
 | 404 | `not_found` | No such user upstream. |
-| 400 | `invalid_request` | Malformed body or limits exceeded. |
+| 400 | `invalid_request` | Malformed body. |
 | 503 | `upstream_unavailable` | Directory unreachable. |
 
 A suspended or deactivated account **MUST** resolve normally rather than `404`.
@@ -212,9 +212,6 @@ where it resolves to `false` (§2 rule 3).
 |---|---|---|
 | `auth.enabled` | `false` | Mount the module. |
 | `auth.driver` | `mock` | Upstream driver to use. |
-| `auth.required` | `true` | Counts toward `/readyz` (SPEC.md §4.2). |
-| `auth.timeout_ms` | `2000` | Upstream deadline (SPEC.md §3.3). |
-| `auth.max_groups` | `512` | SPEC.md §3.4. |
 | `auth.members_cap` | `1000` | §4. |
 
 This module defines no key naming a distinguished group, and an implementation
@@ -234,7 +231,7 @@ class AuthDriver(Protocol):
 ```
 
 `Headers` is an ordered, duplicate-preserving sequence of `(name, value)`, not a
-mapping, so that a driver can detect the condition in SPEC.md §3.5.3. It exposes
+mapping, so that a driver can detect the condition in SPEC.md §3.2.3. It exposes
 `get_all(name) -> list[str]` and `sole(name) -> str | None`, where `sole` raises
 if the header appears more than once. It exposes no single-value indexing
 operator.

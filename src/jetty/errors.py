@@ -21,7 +21,6 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "not_found"
     MODULE_DISABLED = "module_disabled"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
-    PAYLOAD_TOO_LARGE = "payload_too_large"
     RATE_LIMITED = "rate_limited"
     INTERNAL_ERROR = "internal_error"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -36,7 +35,6 @@ _SEMANTICS: dict[ErrorCode, tuple[int, bool]] = {
     ErrorCode.NOT_FOUND: (404, False),
     ErrorCode.MODULE_DISABLED: (404, False),
     ErrorCode.UNSUPPORTED_MEDIA_TYPE: (415, False),
-    ErrorCode.PAYLOAD_TOO_LARGE: (413, False),
     ErrorCode.RATE_LIMITED: (429, True),
     ErrorCode.INTERNAL_ERROR: (500, True),
     ErrorCode.UPSTREAM_UNAVAILABLE: (503, True),

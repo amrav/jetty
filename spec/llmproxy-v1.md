@@ -2,7 +2,6 @@
 
 Mount: a module-declared listener, default `http://127.0.0.1:7242`
 Control-plane mount: `/llmproxy/v1` on the control listener
-`required: false` by default
 Depends on: [SPEC.md](../SPEC.md) §1–§4.
 
 Serves widely-implemented LLM HTTP APIs so that a client configured with a
@@ -17,7 +16,7 @@ separate from the control listener, because the URL layouts they emulate would
 otherwise collide with this specification's own routes.
 
 The listener address **MUST** be reported as `modules[].listener` in
-`GET /v1/meta` (SPEC.md §4.3).
+`GET /v1/meta` (SPEC.md §4.2).
 
 The surfaces in §2 conform to the APIs they emulate, not to SPEC.md §3. Error
 responses on those surfaces **MUST** use the emulated API's error shape and
@@ -166,5 +165,3 @@ endpoint reports counters only.
 | `llmproxy.listener` | `127.0.0.1:7242` | A non-loopback address requires `allow_remote = true`. |
 | `llmproxy.surfaces` | `["openai"]` | At least one; see §2. |
 | `llmproxy.require_identity` | `false` | Requires the `auth` module to be enabled. |
-| `llmproxy.timeout_s` | `120` | Generation deadline, overriding SPEC.md §3.3. |
-| `llmproxy.max_body_bytes` | `10485760` | Surface-listener body cap, overriding SPEC.md §2.2. |

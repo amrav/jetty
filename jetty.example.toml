@@ -8,12 +8,10 @@
 uds = "/run/jetty/jetty.sock"
 uds_mode = 0o660
 
-# Loopback TCP alternative. A token is then mandatory — an unauthenticated
-# listener that answers "is alice an admin?" is a privilege-escalation
-# primitive for anything else on the box.
+# Loopback TCP alternative. The protocol defines no transport authentication,
+# so a TCP listener is reachable by any process that can reach the address.
 #   uds = ""
 #   tcp = "127.0.0.1:7241"
-#   token = "..."   # from your secret store, never committed
 
 [log]
 level = "info"
@@ -32,7 +30,6 @@ enabled = true
 #   [modules.auth]
 #   enabled = true
 #   driver = "mock"
-#   timeout_ms = 2000
 
 # Specified in spec/llmproxy-v1.md, not yet implemented.
 #

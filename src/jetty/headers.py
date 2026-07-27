@@ -1,4 +1,4 @@
-"""Forwarded request headers (SPEC.md §3.5).
+"""Forwarded request headers (SPEC.md §3.2).
 
 The client sends every header it received, so this container holds an untrusted
 bag of name/value pairs. Two properties are load-bearing and are the reason this
@@ -24,7 +24,7 @@ from typing import Iterable, Iterator, Sequence
 class DuplicateHeaderError(Exception):
     """A header required to be unique appeared more than once.
 
-    Per SPEC.md §3.5 a driver MUST turn this into `401`, never pick a winner.
+    Per SPEC.md §3.2 a driver MUST turn this into `401`, never pick a winner.
     """
 
     def __init__(self, name: str, count: int) -> None:
@@ -79,19 +79,11 @@ class Headers:
             raise DuplicateHeaderError(name.lower(), len(values))
         return values[0]
 
-    def byte_size(self) -> int:
-        return sum(len(n.encode()) + len(v.encode()) for n, v in self._pairs)
-
     def to_wire(self) -> list[list[str]]:
         return [[n, v] for n, v in self._pairs]
 
     @staticmethod
-    def from_wire(
-        raw: object,
-        *,
-        max_entries: int,
-        max_bytes: int,
-    ) -> "Headers":
+    def from_wire(raw: object) -> "Headers":
         """Parse and validate the `headers` field of a request.
 
         Raises ValueError with a message safe to surface (no header values —
@@ -114,13 +106,4 @@ class Headers:
                 raise ValueError("header name must not be empty")
             pairs.append((name.lower(), value))
 
-        # Count before byte-checking so an enormous request is rejected on the
-        # cheap test first.
-        if len(pairs) > max_entries:
-            raise ValueError(f"too many headers: {len(pairs)} > {max_entries}")
-
-        headers = Headers(pairs)
-        size = headers.byte_size()
-        if size > max_bytes:
-            raise ValueError(f"headers too large: {size} bytes > {max_bytes}")
-        return headers
+        return Headers(pairs)

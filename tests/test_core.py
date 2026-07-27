@@ -20,7 +20,7 @@ def build(**modules: dict) -> TestClient:
 # --------------------------------------------------------------- core endpoints
 
 
-def test_healthz_is_liveness_only_and_needs_no_auth():
+def test_healthz_is_liveness_only():
     with build() as c:
         r = c.get("/healthz")
     assert r.status_code == 200
@@ -28,56 +28,21 @@ def test_healthz_is_liveness_only_and_needs_no_auth():
     assert r.json()["spec_version"] == SPEC_VERSION
 
 
-def test_healthz_stays_200_when_a_module_is_unhealthy():
-    """The whole point of splitting liveness from readiness (SPEC.md §4.1).
-
-    A broken upstream must not make a supervisor restart the sidecar.
-    """
-    with build(reference={"enabled": True, "healthy": False}) as c:
-        assert c.get("/healthz").status_code == 200
-        assert c.get("/readyz").status_code == 200  # reference is not `required`
 
 
-def test_readyz_reports_per_module_and_503s_on_a_required_failure(monkeypatch):
-    from jetty.modules.reference.module import ReferenceModule
-
-    monkeypatch.setattr(ReferenceModule, "required", True)
-    with build(reference={"enabled": True, "healthy": False}) as c:
-        r = c.get("/readyz")
-    assert r.status_code == 503
-    body = r.json()
-    assert body["ok"] is False
-    assert body["modules"]["reference"] == {
-        "ready": False,
-        "required": True,
-        "detail": "upstream_unavailable",
-    }
 
 
-def test_readyz_detail_is_always_a_spec_error_code_or_null():
-    """SPEC.md §4.2 forbids free text in `detail`."""
-    from jetty.errors import ErrorCode
-
-    codes = {str(c) for c in ErrorCode}
-    with build(reference={"enabled": True, "healthy": False}) as c:
-        modules = c.get("/readyz").json()["modules"]
-    for entry in modules.values():
-        assert entry["detail"] is None or entry["detail"] in codes
 
 
-def test_meta_advertises_enabled_modules_and_limits():
+def test_meta_advertises_enabled_modules():
     with build(reference={"enabled": True}) as c:
         body = c.get("/v1/meta").json()
     assert body["spec_version"] == SPEC_VERSION
     assert [m["name"] for m in body["modules"]] == ["reference"]
     assert body["modules"][0]["mount"] == "/reference"
-    assert body["limits"]["groups_per_request"] == 512
-    assert body["limits"]["body_bytes"] == 1024 * 1024
-    # Sized for whole-request header forwarding (SPEC.md §3.5). A client that
-    # forwards everything it received cannot know it will fit unless the caps
-    # are discoverable here.
-    assert body["limits"]["headers_per_request"] == 128
-    assert body["limits"]["header_bytes"] == 64 * 1024
+    # No limits block and no readiness flag — both removed from the protocol.
+    assert "limits" not in body
+    assert "required" not in body["modules"][0]
 
 
 # ------------------------------------------------------------ enable / disable
@@ -86,7 +51,7 @@ def test_meta_advertises_enabled_modules_and_limits():
 def test_nothing_is_enabled_by_default():
     with build() as c:
         assert c.get("/v1/meta").json()["modules"] == []
-        # SPEC.md §4.4: a disabled module's route does not exist, and says so
+        # SPEC.md §4.3: a disabled module's route does not exist, and says so
         # with `module_disabled` rather than a bare not_found.
         r = c.post("/reference/v1/echo", json={"message": "hi"})
     assert r.status_code == 404
@@ -159,33 +124,22 @@ def test_unknown_request_field_is_rejected_not_ignored():
     assert r.json()["error"]["code"] == "invalid_request"
 
 
-def test_request_id_is_echoed_and_generated():
-    with build(reference={"enabled": True}) as c:
-        assert c.get("/healthz", headers={"x-request-id": "abc"}).headers[
-            "x-request-id"
-        ] == "abc"
-        assert c.get("/healthz").headers["x-request-id"]
-
 
 # ------------------------------------------------------------------ transport
 
 
-def test_tcp_listener_requires_a_bearer_token():
-    with pytest.raises(ValueError, match="listener.token is required"):
-        Config.model_validate({"listener": {"uds": None, "tcp": "127.0.0.1:7241"}})
 
 
 def test_tcp_listener_refuses_non_loopback_without_explicit_optin():
     with pytest.raises(ValueError, match="allow_remote"):
         Config.model_validate(
-            {"listener": {"uds": None, "tcp": "0.0.0.0:7241", "token": "t"}}
+            {"listener": {"uds": None, "tcp": "0.0.0.0:7241"}}
         )
     ok = Config.model_validate(
         {
             "listener": {
                 "uds": None,
                 "tcp": "0.0.0.0:7241",
-                "token": "t",
                 "allow_remote": True,
             }
         }
@@ -205,26 +159,6 @@ def test_exactly_one_listener():
         Config.model_validate({"listener": {"uds": None}})
 
 
-def test_bearer_token_enforced_on_modules_but_not_health():
-    cfg = Config.model_validate(
-        {
-            "listener": {"uds": None, "tcp": "127.0.0.1:7241", "token": "sekrit"},
-            "modules": {"reference": {"enabled": True}},
-        }
-    )
-    with TestClient(create_app(cfg)) as c:
-        assert c.get("/healthz").status_code == 200
-        assert c.get("/readyz").status_code == 200
-        assert c.get("/v1/meta").status_code == 401
-        assert c.get("/v1/meta").json()["error"]["code"] == "unauthenticated"
-        assert (
-            c.get("/v1/meta", headers={"authorization": "Bearer sekrit"}).status_code
-            == 200
-        )
-        assert (
-            c.get("/v1/meta", headers={"authorization": "Bearer wrong"}).status_code
-            == 401
-        )
 
 
 def test_unknown_config_key_is_rejected():

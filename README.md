@@ -25,7 +25,7 @@ details stay internal.
 |---|---|
 | Protocol spec (`SPEC.md`) — normative, standalone | Written, for review |
 | Rationale ([`DESIGN-NOTES.md`](DESIGN-NOTES.md)) — non-normative | Written |
-| Core: config, registry, listeners, `/healthz` `/readyz` `/v1/meta`, error envelope | **Implemented, tested** |
+| Core: config, registry, listeners, `/healthz` `/v1/meta`, error envelope | **Implemented, tested** |
 | `reference` module (worked example + test fixture) | **Implemented, tested** |
 | `auth` module ([`spec/auth-v1.md`](spec/auth-v1.md)) | Specified, not implemented |
 | `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
@@ -65,12 +65,11 @@ Four choices worth knowing before reading the code:
 - **An unknown module name in config is a boot failure**, not a warning. A typo
   in `[modules.ath]` would otherwise silently leave auth off.
 - **`/healthz` never touches an upstream.** It answers only "should my
-  supervisor restart me?". Readiness — which does check upstreams — is
-  `/readyz`. Conflating them means a remote outage restarts your whole fleet,
-  which cannot help and removes the component that was correctly reporting the
-  problem.
-- **Fail closed, everywhere.** Any upstream failure is a `5xx`; a limit breach
-  is a `400`, never a silent truncation. A truncated authorization answer is
+  supervisor restart me?". A liveness probe that reported upstream health would
+  restart the whole fleet during a remote outage, which cannot help and removes
+  the component that was correctly reporting the problem.
+- **Fail closed, everywhere.** Any upstream failure is a `5xx`, never a `200`
+  carrying a degraded or partial answer. A partial authorization result is
   indistinguishable from a negative one until the day it reads as positive.
 
 ## Notable changes from the original API draft
@@ -84,7 +83,7 @@ The substantive changes:
 
 | Change | Why |
 |---|---|
-| `/healthz` split into `/healthz` + `/readyz` | The draft's upstream-checking `/healthz`, wired to a liveness probe, restarts the fleet during a directory blip. |
+| `/healthz` reports liveness only, never upstream health | The draft's upstream-checking `/healthz`, wired to a liveness probe, restarts the fleet during a directory blip. |
 | Structured error envelope, closed `code` set | The draft specified status codes only. "Directory is down" and "module is disabled" demand opposite client behaviour; a status code alone cannot say which. |
 | `GET /v1/meta` added | Feature-detection at startup, instead of discovering a missing module via a 404 mid-request. |
 | Transport auth specified | The draft never said who may call the sidecar. An unauthenticated TCP listener that answers "is alice an admin?" is a privilege-escalation primitive. |
@@ -92,7 +91,6 @@ The substantive changes:
 | `headers` is an array of `[name, value]` pairs, not an object | An object collapses repeated headers, and a repeated identity header is either a broken gateway or a smuggling attempt. Duplicates of a selected credential are now a hard `401` rather than a silent pick. |
 | `gemini_api` renamed `llmproxy` | It serves Gemini, OpenAI *and* Anthropic shapes; naming it after one vendor misleads. |
 | Canonicalization contradiction resolved | The draft said identifiers are lowercased *and* echoed exactly. Now: compare canonically, echo the caller's bytes. |
-| Limits state what they count | "512 groups" vs "512 *distinct* groups", "256 characters" vs "256 bytes". |
 | Unknown group ⇒ `false`, not an error | A deleted group in a client's config must degrade to "grants nobody access", not break every request that mentions it. |
 | No endpoint enumerating a *user's* groups | A closed question can be answered without disclosing an org chart. Group **member** listing stays, as a deliberate asymmetry. |
 
