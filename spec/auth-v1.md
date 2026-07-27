@@ -242,6 +242,18 @@ degraded answer.
 | `auth.max_groups` | `512` | SPEC.md §3.4. |
 | `auth.members_cap` | `1000` | §4. |
 
+There is deliberately **no key naming a privileged group** — no
+`auth.superadmin_group` or equivalent — and there will not be one (SPEC.md §7).
+Every group this module handles is an opaque string it looks up and reports on;
+none is special to Jetty.
+
+An application that grants blanket access to some admin group holds that fact in
+its **own** config, alongside the resources it protects, and asks about that
+group through `identify` like any other. That keeps two clients of one sidecar
+from having to agree on whose admins are special — and keeps an edit to the
+sidecar's config from silently widening access in an application nobody was
+thinking about at the time.
+
 ### Drivers
 
 The module is a protocol shell; a **driver** talks to a real directory.

@@ -440,6 +440,20 @@ module contract they implement is `jetty.modules.base.Module`.
 - **Not a policy engine.** Jetty answers "who is this, what are they in". It
   never answers "may they". Authorization decisions stay in the client, where
   the resource model lives.
+
+  In particular, Jetty has **no notion of a privileged group** — no superadmin
+  group, no admin role, no group that means anything to Jetty itself. Every
+  group is an opaque string to be looked up and reported on. An implementation
+  **MUST NOT** accept configuration naming a special group, and a driver **MUST
+  NOT** give any group different treatment from any other.
+
+  This is worth stating because the pull to add one is real: an application that
+  grants blanket access to `eng-hiring-admins` looks like it wants the sidecar
+  to know about that group. It does not. "Which group is special" is a fact
+  about *one application's* resource model — two clients of the same sidecar
+  will disagree about it, and a privileged group configured in the sidecar would
+  silently widen every other client's access the day someone edited it. It
+  belongs in each client's own config, next to the resources it protects.
 - **Not a cache or a database.** §1.1.
 - **Not a service mesh.** One process, co-located, one trust domain.
 - **Not a credential broker for end users.** It validates assertions that a
