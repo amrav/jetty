@@ -73,6 +73,11 @@ def test_meta_advertises_enabled_modules_and_limits():
     assert body["modules"][0]["mount"] == "/reference"
     assert body["limits"]["groups_per_request"] == 512
     assert body["limits"]["body_bytes"] == 1024 * 1024
+    # Sized for whole-request header forwarding (SPEC.md §3.5). A client that
+    # forwards everything it received cannot know it will fit unless the caps
+    # are discoverable here.
+    assert body["limits"]["headers_per_request"] == 128
+    assert body["limits"]["header_bytes"] == 64 * 1024
 
 
 # ------------------------------------------------------------ enable / disable

@@ -40,20 +40,34 @@ about the resulting user in the same round trip.
 
 ```json
 {
-  "headers": { "x-corp-user": "avarma", "x-corp-token": "…" },
+  "headers": [
+    ["x-corp-user", "avarma"],
+    ["x-corp-token", "…"],
+    ["accept", "application/json"],
+    ["user-agent", "cadet/0.1.0"]
+  ],
   "groups": ["eng-hiring", "eng-all"]
 }
 ```
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `headers` | object(string→string) | yes | Verbatim headers the client received. Client **MUST** send an allowlist, never everything. Max 32 (SPEC.md §3.4). |
+| `headers` | array of `[name, value]` | yes | **Every** header the client received, verbatim and unfiltered — SPEC.md §3.5. Names lowercased, order preserved, duplicates kept. Max 128 entries / 64 KiB. |
 | `groups` | string[] | no, default `[]` | Group ids to check. Empty is valid and means *pure authentication*. |
+
+The client does **not** choose which headers matter, and this module **MUST NOT**
+offer a setting that makes it choose (SPEC.md §3.5). Picking the credential out
+of the set is the driver's job, because only the driver knows what the corp
+gateway calls it — and only the driver has to be redeployed when that changes.
 
 `headers` **MUST** be present, even if empty — an absent `headers` key is
 `400 invalid_request`, not an anonymous identify. The distinction matters:
-`{"headers": {}}` is "I received no credentials" (→ `401`) whereas a missing key
-is a malformed client.
+`{"headers": []}` is "I received no credentials" (→ `401`), whereas a missing key
+is a malformed client, and conflating the two hides a broken integration behind
+what looks like a routine auth failure.
+
+A driver **MUST** fail `401` if a header it selects for authentication appears
+more than once (SPEC.md §3.5).
 
 ### Response `200`
 
@@ -102,8 +116,8 @@ membership. Authentication fails first and completely.
 ### The bare-header rule
 
 An implementation **MUST NOT** treat an unverified identity claim as
-authentication. A request whose `headers` contain only `{"x-corp-user": "alice"}`
-— a name with no accompanying token, signature, or assertion — **MUST** return
+authentication. A request whose `headers` contain `["x-corp-user", "alice"]` —
+a name with no accompanying token, signature, or assertion — **MUST** return
 `401`.
 
 This is the single most important line in this document. Everything else here is
@@ -111,6 +125,15 @@ a convenience; this is the security boundary. Anything on the host can set a
 header. Conformance test `identify_bare_header_rejected` enforces it by
 stripping every header matching `/token|secret|signature|assertion/i` from an
 otherwise-valid request and requiring a `401`.
+
+Whole-request forwarding (SPEC.md §3.5) raises the stakes here rather than
+lowering them. The sidecar now receives every header the client received,
+including ones an end user fully controls, so "this header was present" carries
+no authority whatsoever. A driver **MUST** treat the header set as an
+untrusted bag from which it *verifies* a credential — never as a set of facts to
+read a username out of. A driver that resolves an identity from any header it
+did not cryptographically verify is non-conformant, however tempting the header
+name looks.
 
 ---
 
@@ -225,11 +248,25 @@ The module is a protocol shell; a **driver** talks to a real directory.
 
 ```python
 class AuthDriver(Protocol):
-    async def identify(self, headers: Mapping[str, str]) -> Subject | None: ...
+    async def identify(self, headers: Headers) -> Subject | None: ...
     async def member_of(self, username: str, groups: Sequence[str]) -> dict[str, bool]: ...
     async def group_members(self, group_id: str, cap: int) -> GroupMembers | None: ...
     async def ping(self) -> None: ...
 ```
+
+`Headers` is an ordered, duplicate-preserving sequence of `(name, value)` — not
+a mapping. The type is deliberate: a `dict` would make it impossible for a
+driver to detect the duplicate-credential case it is required to reject
+(SPEC.md §3.5), and a driver cannot opt back into safety once the information
+has been discarded at the boundary. It offers `get_all(name) -> list[str]` and
+deliberately offers no `[]` accessor, so that "there is exactly one of these"
+is a decision the driver states rather than one the container makes silently.
+
+**Header selection is the driver's private business.** It is the only component
+that knows which names the local gateway uses, and changing that knowledge must
+require redeploying only the driver — never reconfiguring any OSS client. A
+driver that cannot find a credential it recognises returns `None`, and the
+module answers `401`.
 
 `identify` returns `None` for "credentials did not validate" and **raises** for
 "could not reach the directory" — the module maps the former to `401` and the

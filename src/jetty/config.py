@@ -14,10 +14,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: SPEC.md §3.4. Defaults; the limits table in /v1/meta is generated from these.
+#: The header caps are sized for whole-request forwarding (SPEC.md §3.5):
+#: clients send every header they received, so these must accommodate a
+#: browser's full set plus a gateway's additions, and a lone Cookie can be
+#: several KiB — hence a byte cap alongside the count.
 DEFAULT_LIMITS = {
     "groups_per_request": 512,
     "identifier_length": 256,
-    "headers_per_request": 32,
+    "headers_per_request": 128,
+    "header_bytes": 64 * 1024,
     "body_bytes": 1024 * 1024,
 }
 

@@ -221,8 +221,15 @@ Clients **SHOULD** set a timeout strictly greater than the sidecar's.
 |---|---|---|---|
 | `groups[]` per request | 512 | **distinct** entries after canonicalization | `400 invalid_request` |
 | Identifier length | 256 **bytes**, UTF-8 encoded | each raw entry as sent | `400 invalid_request` |
-| Forwarded headers per request | 32 | header count | `400 invalid_request` |
+| Forwarded headers per request | 128 | header entries, duplicates counted separately | `400 invalid_request` |
+| Forwarded header bytes | 64 KiB | sum of all name+value bytes | `400 invalid_request` |
 | Request body | 1 MiB | encoded bytes | `413 payload_too_large` |
+
+The two header limits are sized for **whole-request forwarding** (§3.5): clients
+send every header they received rather than a configured subset, so the caps
+have to accommodate a browser's full header set plus a gateway's additions.
+A single `Cookie` header can be several KiB on its own, which is why there is a
+byte cap as well as a count.
 
 Both "counted over" columns are load-bearing and are stated because leaving them
 implicit has already caused divergence in a prior implementation of a similar
@@ -236,6 +243,74 @@ instead of discovering a cap by tripping it.
 Exceeding a limit is **always** an error, never a silent truncation (§1.2).
 Where a response is *inherently* partial — enumerating a large group — that is
 signalled explicitly by a `truncated` flag (§4.3.3).
+
+---
+
+### 3.5 Header forwarding
+
+Modules that validate an assertion made by an upstream gateway need the headers
+the client received. This section defines how they cross the boundary, because
+getting it wrong is a security bug and every such module gets it identically.
+
+#### The rule
+
+**The client forwards every header it received, verbatim and unfiltered. The
+sidecar decides which ones mean anything.**
+
+Clients **MUST NOT** be required to configure which headers to send, and
+implementations **MUST NOT** define a client-side allowlist.
+
+*Why:* the header names a corp gateway uses are exactly the kind of internal
+detail Jetty exists to hide. An OSS binary configured with
+`forward_headers = x-corp-user,x-corp-token` has corp topology baked into its
+deployment, and the day that gateway renames a header, every OSS consumer needs
+reconfiguring — and until they do, authentication fails in a way that looks like
+an outage rather than a config drift. Selection belongs in the driver, next to
+the knowledge of what the names mean.
+
+The cost is that headers the sidecar does not need cross the process boundary,
+including `Cookie`. This is accepted deliberately: client and sidecar are
+co-located in one trust domain (§1.5), and the alternative — a client-side
+filter — trades a real, recurring operational failure for a marginal reduction
+in exposure within a boundary that is already shared. §1.4's prohibition on
+logging credential material applies to every forwarded header, not just the
+ones a driver selects.
+
+#### Wire format
+
+`headers` is an **array of `[name, value]` pairs**, not an object:
+
+```json
+"headers": [
+  ["x-corp-user", "avarma"],
+  ["x-corp-token", "…"],
+  ["accept", "application/json"]
+]
+```
+
+An object would collapse repeated headers, and HTTP permits repeats. That
+collapse is security-relevant: if a gateway sets `x-corp-user` and an attacker
+also sends one, an object silently keeps one of them — most JSON parsers keep
+the last — and the sidecar can no longer tell that anything was duplicated. The
+array preserves both order and duplicates so the driver can refuse.
+
+- Names **MUST** be lowercased by the client (HTTP header names are
+  case-insensitive; lowercasing makes driver matching exact).
+- Order **MUST** be preserved as received.
+- Values **MUST** be sent verbatim — no trimming, decoding, or joining.
+- The array **MAY** be empty, meaning "I received no headers". It is still a
+  well-formed request, and authentication simply fails.
+
+#### Duplicate credential headers
+
+If a driver selects a header for authentication and that header appears **more
+than once**, the request **MUST** fail `401 unauthenticated`. It **MUST NOT**
+pick the first, the last, or attempt to merge.
+
+A duplicated identity header means either a misconfigured gateway or an attempt
+to smuggle one past it. Neither has a safe interpretation, and "pick one" turns
+an ambiguity into a silent, attacker-influenced choice. Failing closed here is
+the only defensible behaviour.
 
 ---
 
@@ -300,7 +375,8 @@ via a 404 in the middle of a user request.
       "listener": "http://127.0.0.1:7242" }
   ],
   "limits": { "groups_per_request": 512, "identifier_length": 256,
-              "headers_per_request": 32, "body_bytes": 1048576 }
+              "headers_per_request": 128, "header_bytes": 65536,
+              "body_bytes": 1048576 }
 }
 ```
 

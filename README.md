@@ -82,6 +82,8 @@ The substantive ones, each argued in place in `SPEC.md`:
 | Structured error envelope, closed `code` set | The draft specified status codes only. "Directory is down" and "module is disabled" demand opposite client behaviour; a status code alone cannot say which. |
 | `GET /v1/meta` added | Feature-detection at startup, instead of discovering a missing module via a 404 mid-request. |
 | Transport auth specified | The draft never said who may call the sidecar. An unauthenticated TCP listener that answers "is alice an admin?" is a privilege-escalation primitive. |
+| Clients forward **every** header; the sidecar selects | The draft had the client name `x-proxy-auth-token`, baking corp topology into every OSS deployment — the exact coupling jetty exists to remove. A gateway rename would then break every consumer until each was reconfigured. |
+| `headers` is an array of `[name, value]` pairs, not an object | An object collapses repeated headers, and a repeated identity header is either a broken gateway or a smuggling attempt. Duplicates of a selected credential are now a hard `401` rather than a silent pick. |
 | `gemini_api` renamed `llmproxy` | It serves Gemini, OpenAI *and* Anthropic shapes; naming it after one vendor misleads. |
 | Canonicalization contradiction resolved | The draft said identifiers are lowercased *and* echoed exactly. Now: compare canonically, echo the caller's bytes. |
 | Limits state what they count | "512 groups" vs "512 *distinct* groups", "256 characters" vs "256 bytes". |
