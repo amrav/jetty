@@ -5,7 +5,7 @@
 [listener]
 # Preferred transport: a unix socket, where filesystem permissions are the ACL
 # and no token has to be distributed (SPEC.md §1.5).
-uds = "/run/jetty/jetty.sock"
+uds = "/tmp/jetty/jetty.sock"
 uds_mode = 0o660
 
 # Loopback TCP alternative. The protocol defines no transport authentication,

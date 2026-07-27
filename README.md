@@ -40,9 +40,8 @@ component.
 ```sh
 uv venv && uv pip install -e '.[dev]'
 
-sed 's|/run/jetty|/tmp/jetty|' jetty.example.toml > /tmp/jetty.toml
-.venv/bin/jetty --config /tmp/jetty.toml --check     # validate, don't bind
-.venv/bin/jetty --config /tmp/jetty.toml             # serve
+.venv/bin/jetty --config jetty.example.toml --check   # validate, don't bind
+.venv/bin/jetty --config jetty.example.toml          # serve
 
 curl --unix-socket /tmp/jetty/jetty.sock http://localhost/v1/meta
 ```

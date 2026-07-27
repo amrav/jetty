@@ -29,6 +29,41 @@ def _fail(message: str) -> None:
     raise SystemExit(2)
 
 
+def _secure_parent_dir(directory: Path) -> None:
+    """Ensure the socket's directory cannot be controlled by another user.
+
+    The socket file's permissions are the whole access control (SPEC.md §1.5),
+    but that guarantee assumes nobody else can manipulate the directory holding
+    it. The default path lives under /tmp, which is world-writable: another
+    local user can pre-create the directory, and from inside a directory they
+    own they can unlink our socket and bind their own at the same path —
+    clients would then connect to theirs.
+
+    So: create it 0700, and if it already exists, refuse to start unless we own
+    it and it is not writable by group or other.
+    """
+    if not directory.exists():
+        directory.mkdir(parents=True, mode=0o700)
+        return
+
+    if not directory.is_dir():
+        _fail(f"{directory} exists and is not a directory")
+
+    info = directory.stat()
+    if info.st_uid != os.geteuid():
+        _fail(
+            f"{directory} is owned by uid {info.st_uid}, not this process "
+            f"(uid {os.geteuid()}); refusing to bind a socket in a directory "
+            "another user controls"
+        )
+    if info.st_mode & 0o022:
+        _fail(
+            f"{directory} is writable by group or other "
+            f"(mode {stat.S_IMODE(info.st_mode):#o}); another user could replace "
+            "the socket"
+        )
+
+
 def bind_uds(path: Path, mode: int) -> socket.socket:
     """Bind a unix socket at `path` with exactly `mode` (SPEC.md §1.5).
 
@@ -36,7 +71,7 @@ def bind_uds(path: Path, mode: int) -> socket.socket:
     mode at creation, and the explicit chmod afterwards pins it regardless of
     what the inherited umask happened to be.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_parent_dir(path.parent)
     # A stale socket file from an unclean exit makes bind() fail with
     # EADDRINUSE even though nothing is listening.
     if path.exists() and stat.S_ISSOCK(path.stat().st_mode):

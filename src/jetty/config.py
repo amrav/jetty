@@ -34,7 +34,7 @@ class ListenerConfig(Strict):
     listener is reachable by any process that can reach the bound address.
     """
 
-    uds: str | None = "/run/jetty/jetty.sock"
+    uds: str | None = "/tmp/jetty/jetty.sock"
     tcp: str | None = None
     #: SPEC.md §1.5 — the socket must not be reachable by other users.
     uds_mode: int = 0o660

@@ -111,3 +111,50 @@ def test_disabled_module_404s_over_uds(server: Path):
     # gap was originally spotted, over a live socket.
     assert '"error"' in body
     assert "detail" not in body
+
+
+# ------------------------------------------------- socket directory ownership
+
+
+def test_refuses_a_world_writable_socket_directory(tmp_path: Path):
+    """The default socket path is under /tmp, which is world-writable.
+
+    A directory another user can write to lets them unlink our socket and bind
+    their own at the same path, so clients would connect to theirs. Binding
+    inside one must be refused rather than silently accepted.
+    """
+    sockdir = tmp_path / "jetty"
+    sockdir.mkdir(mode=0o777)
+    os.chmod(sockdir, 0o777)  # mkdir mode is masked by umask
+    cfg = _write_config(tmp_path, sockdir / "jetty.sock")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "jetty.cli", "--config", str(cfg)],
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(REPO / "src")},
+        timeout=30,
+    )
+    assert proc.returncode == 2, proc.stdout.decode() + proc.stderr.decode()
+    assert b"writable by group or other" in proc.stderr
+
+
+def test_creates_a_missing_socket_directory_privately(tmp_path: Path):
+    sockdir = tmp_path / "nested" / "jetty"
+    cfg = _write_config(tmp_path, sockdir / "jetty.sock")
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "jetty.cli", "--config", str(cfg)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env={**os.environ, "PYTHONPATH": str(REPO / "src")},
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not (sockdir / "jetty.sock").exists():
+            assert proc.poll() is None, (proc.stdout.read().decode() if proc.stdout else "")
+            time.sleep(0.1)
+        assert (sockdir / "jetty.sock").exists()
+        assert stat.S_IMODE(sockdir.stat().st_mode) == 0o700
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

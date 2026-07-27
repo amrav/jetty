@@ -103,7 +103,7 @@ apply to them.
 
 | Listener | Default | Carries |
 |---|---|---|
-| control | `unix:/run/jetty/jetty.sock` | This specification |
+| control | `unix:/tmp/jetty/jetty.sock` | This specification |
 | module-declared | per module | Foreign protocols |
 
 An implementation **MUST** support unix domain sockets and **SHOULD** support
