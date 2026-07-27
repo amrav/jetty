@@ -23,7 +23,8 @@ details stay internal.
 
 | Piece | State |
 |---|---|
-| Protocol spec (`SPEC.md`) | Written, for review |
+| Protocol spec (`SPEC.md`) — normative, standalone | Written, for review |
+| Rationale ([`DESIGN-NOTES.md`](DESIGN-NOTES.md)) — non-normative | Written |
 | Core: config, registry, listeners, `/healthz` `/readyz` `/v1/meta`, error envelope | **Implemented, tested** |
 | `reference` module (worked example + test fixture) | **Implemented, tested** |
 | `auth` module ([`spec/auth-v1.md`](spec/auth-v1.md)) | Specified, not implemented |
@@ -74,7 +75,12 @@ Four choices worth knowing before reading the code:
 
 ## Notable changes from the original API draft
 
-The substantive ones, each argued in place in `SPEC.md`:
+`SPEC.md` and the module specifications are normative and carry no rationale, so
+that they stand alone as a contract. The reasoning behind each decision —
+including every row below — is in [`DESIGN-NOTES.md`](DESIGN-NOTES.md), which is
+explicitly non-normative.
+
+The substantive changes:
 
 | Change | Why |
 |---|---|

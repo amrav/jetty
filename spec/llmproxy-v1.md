@@ -1,38 +1,38 @@
 # Jetty module: `llmproxy` — v1
 
-Mount: its **own listener**, default `http://127.0.0.1:7242` · `required: false`
+Mount: a module-declared listener, default `http://127.0.0.1:7242`
 Control-plane mount: `/llmproxy/v1` on the control listener
+`required: false` by default
 Depends on: [SPEC.md](../SPEC.md) §1–§4.
 
-Lets an OSS binary that already speaks a public LLM API — `google-genai`,
-`openai`, `anthropic` — talk to an internal model gateway by changing one
-environment variable (`base_url`) and nothing else.
+Serves widely-implemented LLM HTTP APIs so that a client configured with a
+`base_url` can reach an internal model service without further modification.
 
 ---
 
-## 1. Why a separate listener
+## 1. Listeners
 
-Third-party SDKs hardcode their URL layout. `openai` insists on `/v1/chat/…`,
-`google-genai` on `/v1beta/models/…`. Mounting those under Jetty's control
-listener would collide with Jetty's own `/v1/meta`, and would mean an
-unauthenticated model call and a privileged identity call share a socket and an
-access-control decision.
+The LLM surfaces are served on a module-declared listener (SPEC.md §2.1),
+separate from the control listener, because the URL layouts they emulate would
+otherwise collide with this specification's own routes.
 
-So: the LLM surface gets its own listener, and Jetty's `/llmproxy/v1` on the
-control listener carries only the *control plane* (§5). The listener address is
-advertised in `GET /v1/meta` (SPEC.md §4.3).
+The listener address **MUST** be reported as `modules[].listener` in
+`GET /v1/meta` (SPEC.md §4.3).
 
-**Foreign surfaces are not this specification.** `/openai/v1/chat/completions`
-conforms to OpenAI's API, not to SPEC.md §3's error envelope, because the whole
-point is that an unmodified SDK works. Errors on foreign surfaces **MUST** use
-the emulated vendor's error shape. SPEC.md §1 (statelessness, fail-closed,
-credential isolation) still applies.
+The surfaces in §2 conform to the APIs they emulate, not to SPEC.md §3. Error
+responses on those surfaces **MUST** use the emulated API's error shape and
+**MUST NOT** use the envelope in SPEC.md §3.1. SPEC.md §1 applies to them in
+full.
+
+The control-plane endpoints in §5 are served on the control listener and
+conform to SPEC.md §3 in full.
 
 ---
 
 ## 2. Surfaces
 
-Each is independently enableable; enabling none is a configuration error.
+Each surface is independently enableable. An implementation **MUST** reject a
+configuration that enables the module with no surfaces.
 
 | Surface | Prefix | Emulates |
 |---|---|---|
@@ -46,31 +46,29 @@ Each is independently enableable; enabling none is a configuration error.
 - `POST /genai/v1beta/models/{model}:streamGenerateContent` — SSE when `?alt=sse`
 - `POST /genai/v1beta/models/{model}:embedContent`
 - `POST /genai/v1beta/models/{model}:batchEmbedContents`
-- `GET  /genai/v1beta/models` — model list, from the driver
+- `GET  /genai/v1beta/models`
 
 ### 2.2 `openai`
 
-- `POST /openai/v1/chat/completions` — `stream: true` ⇒ SSE terminated by `data: [DONE]`
+- `POST /openai/v1/chat/completions` — SSE when `stream: true`, terminated by `data: [DONE]`
 - `POST /openai/v1/embeddings`
 - `GET  /openai/v1/models`
 
 ### 2.3 `anthropic`
 
-- `POST /anthropic/v1/messages` — `stream: true` ⇒ SSE with Anthropic's typed
-  events (`message_start`, `content_block_delta`, …)
+- `POST /anthropic/v1/messages` — SSE when `stream: true`, using the emulated
+  API's typed events (`message_start`, `content_block_delta`, and so on)
 - `GET  /anthropic/v1/models`
 
 An enabled surface **MUST** implement every endpoint listed for it, or return
-the vendor's own `404`/`not_found` shape for the ones it does not. It **MUST
-NOT** return a Jetty error envelope on a foreign surface.
+the emulated API's own not-found response for those it does not.
 
 ---
 
-## 3. The driver interface
+## 3. Driver interface
 
-All three surfaces are translated into one internal representation and handed to
-a **driver**. Adding a vendor surface must not require touching any driver, and
-adding a driver must not require touching any surface.
+Every surface translates requests into one internal representation and
+dispatches to a **driver**.
 
 ```python
 class LLMDriver(Protocol):
@@ -81,63 +79,55 @@ class LLMDriver(Protocol):
     async def ping(self) -> None: ...
 ```
 
-Shipped in this repository:
+Adding a surface **MUST NOT** require changes to any driver, and adding a driver
+**MUST NOT** require changes to any surface.
 
-| Driver | Purpose |
+Drivers defined alongside this document:
+
+| Driver | Behaviour |
 |---|---|
-| `mock` | Deterministic canned responses keyed by a hash of the request. No network. The conformance suite and every example run against this. |
-| `passthrough` | Forwards to the real public vendor API using a configured key. Makes the OSS build independently useful. |
-
-A corp driver — the actual reason Jetty exists — lives outside this repository
-and implements the same Protocol.
+| `mock` | Deterministic responses derived from a hash of the request. Performs no network I/O. |
+| `passthrough` | Forwards to the emulated vendor's public API using a configured key. |
 
 ### 3.1 Translation fidelity
 
-Translation is **lossy in one direction only**: a request feature the driver
-cannot express **MUST** be rejected, never silently dropped.
+If a request specifies a parameter the driver cannot honour, the implementation
+**MUST** reject the request with the emulated API's `400`-equivalent error,
+naming the parameter. It **MUST NOT** drop, substitute, or approximate the
+parameter, and **MUST NOT** offer a mode that does so.
 
-Dropping `temperature` produces plausible-looking output that is quietly wrong,
-and no client can detect it. So an unsupported parameter is an error in the
-emulated vendor's shape (`400`), naming the parameter. Implementations **MUST
-NOT** offer a "best effort" mode.
-
-Parameters with no cross-vendor equivalent (`logit_bias`, `top_k` on a surface
-that lacks it) **MUST** be listed in `GET /llmproxy/v1/capabilities` (§5) so a
-client can check before sending rather than discovering by failing.
+Parameters with no equivalent on a given surface **MUST** be reported in
+`GET /llmproxy/v1/capabilities` (§5).
 
 ### 3.2 Streaming
 
-- SSE, `Content-Type: text/event-stream`, `Cache-Control: no-store`.
-- Each surface uses its **own** event framing — Jetty does not invent one.
-- A driver error **mid-stream** is emitted as that vendor's in-band error event
-  and the stream is closed. It **MUST NOT** be a trailing silent close: a
-  truncated completion that looks successful is the streaming equivalent of a
-  fail-open.
-- Client disconnect **MUST** cancel the upstream call. An abandoned generation
-  that keeps billing is the most common way an LLM proxy wastes money.
+- Streaming responses use SSE with `Content-Type: text/event-stream` and
+  `Cache-Control: no-store`.
+- Each surface **MUST** use the event framing of the API it emulates.
+- A driver error occurring mid-stream **MUST** be emitted as that API's in-band
+  error event before the stream closes. An implementation **MUST NOT** close the
+  stream silently, which would present a truncated result as a complete one.
+- Client disconnection **MUST** cancel the corresponding upstream call.
 
 ---
 
-## 4. Identity and quota
+## 4. Identity and credentials
 
-The proxy listener is local, but "local" is not "one user".
+- When the `auth` module is enabled, this module **MAY** be configured to
+  require an identity, resolved through the `auth` driver, and attribute usage
+  to it.
+- Otherwise requests are attributed to the configured service identity.
 
-- If `auth` is also enabled, the proxy **MAY** be configured to require an
-  identity, resolved through the same `auth` driver. It then attributes usage per
-  user rather than per host.
-- Otherwise every request is attributed to the configured service identity.
-
-The proxy **MUST NOT** forward client-supplied vendor API keys upstream. An
-`Authorization` or `x-api-key` header on an incoming proxy request is used only
-for local admission control and **MUST** be stripped before the driver is
-called. Forwarding it would let any local process spend an arbitrary key through
-the sidecar.
+An implementation **MUST NOT** forward client-supplied vendor API keys upstream.
+An `Authorization` or `x-api-key` header on an incoming request to a surface
+listener is used only for local admission control and **MUST** be removed before
+the driver is invoked.
 
 ---
 
 ## 5. Control plane
 
-On the **control listener**, so it obeys SPEC.md §3 fully.
+Served on the control listener; conforms to SPEC.md §3.
 
 ### `GET /llmproxy/v1/capabilities`
 
@@ -154,15 +144,16 @@ On the **control listener**, so it obeys SPEC.md §3 fully.
 }
 ```
 
-Lets a client verify before its first real call that the model it wants exists
-and that the parameters it intends to send are supported.
+Reports the available models, their aliases, and the parameters each does not
+support, so that a client can determine compatibility before issuing a request.
 
 ### `GET /llmproxy/v1/usage`
 
-Aggregate counters since start — requests, tokens, errors, per model and per
-identity when known. Counters only; **no prompt or completion content is ever
-retained**, which is the same rule as SPEC.md §1.4 applied to payloads rather
-than credentials.
+Aggregate counters since process start: requests, tokens, and errors, broken
+down by model and, where known, by identity.
+
+An implementation **MUST NOT** retain prompt or completion content. This
+endpoint reports counters only.
 
 ---
 
@@ -170,10 +161,10 @@ than credentials.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `llmproxy.enabled` | `false` | |
-| `llmproxy.driver` | `mock` | |
-| `llmproxy.listener` | `127.0.0.1:7242` | Non-loopback requires `allow_remote = true`. |
-| `llmproxy.surfaces` | `["openai"]` | At least one. |
-| `llmproxy.require_identity` | `false` | Needs `auth` enabled. |
-| `llmproxy.timeout_s` | `120` | Generation deadline; far longer than §3.3's default because generation is legitimately slow. |
-| `llmproxy.max_body_bytes` | `10485760` | 10 MiB — prompts are larger than control-plane bodies. |
+| `llmproxy.enabled` | `false` | Mount the module. |
+| `llmproxy.driver` | `mock` | Upstream driver to use. |
+| `llmproxy.listener` | `127.0.0.1:7242` | A non-loopback address requires `allow_remote = true`. |
+| `llmproxy.surfaces` | `["openai"]` | At least one; see §2. |
+| `llmproxy.require_identity` | `false` | Requires the `auth` module to be enabled. |
+| `llmproxy.timeout_s` | `120` | Generation deadline, overriding SPEC.md §3.3. |
+| `llmproxy.max_body_bytes` | `10485760` | Surface-listener body cap, overriding SPEC.md §2.2. |

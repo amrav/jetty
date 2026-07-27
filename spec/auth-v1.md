@@ -1,73 +1,68 @@
 # Jetty module: `auth` — v1
 
 Mount: `/auth/v1` on the control listener · `required: true` by default
-Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not repeat.
+Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
-The `auth` module answers two questions and nothing else:
+The `auth` module resolves two things:
 
-- **Who is this?** — validate an assertion a gateway already made.
-- **Are they in these groups?** — a closed-question membership check.
+- **Identity** — validating an assertion issued by an upstream gateway.
+- **Group membership** — answering, for a named set of groups, whether the
+  subject belongs to each.
 
-It never answers *may they do X*. Authorization stays in the client, which is
-where the resource model lives (SPEC.md §7).
+It does not make authorization decisions (SPEC.md §7).
 
 ---
 
-## 1. The closed-question rule
+## 1. Closed-question membership
 
 Every membership endpoint takes an explicit list of group identifiers and
-returns one boolean per identifier. There is deliberately **no endpoint that
-enumerates the groups a user belongs to**.
+returns one boolean per identifier.
 
-*Why:* a user's full group list is a map of the whole organization — projects,
-reorgs, security teams, incident channels. A client that only needs "is this
-person a hiring admin" does not need that, and once such an endpoint exists it
-gets used, logged, and leaked. A closed question can be answered without
-disclosing anything the caller did not already name.
+This module **MUST NOT** expose an endpoint that enumerates the groups a user
+belongs to.
 
-Group **member** enumeration (§4) is the one carve-out, because assigning work
-to a team genuinely requires knowing who is in it. It is deliberately asymmetric:
-you may ask "who is in group G", never "what groups is user U in".
+Enumerating the **members of a named group** is defined in §4. A caller may
+therefore ask which subjects belong to a group it names, and may not ask which
+groups a named subject belongs to.
 
 ---
 
 ## 2. `POST /auth/v1/identify`
 
-Validate forwarded gateway headers into an identity, and answer group questions
-about the resulting user in the same round trip.
+Validates forwarded gateway headers into an identity and answers group questions
+about the resulting subject in one round trip.
 
 ### Request
 
 ```json
 {
   "headers": [
-    ["x-corp-user", "avarma"],
-    ["x-corp-token", "…"],
+    ["x-gateway-user", "avarma"],
+    ["x-gateway-assertion", "…"],
     ["accept", "application/json"],
-    ["user-agent", "cadet/0.1.0"]
+    ["user-agent", "example-client/0.1.0"]
   ],
   "groups": ["eng-hiring", "eng-all"]
 }
 ```
 
+Header names above are illustrative; no header name is significant to this
+specification.
+
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `headers` | array of `[name, value]` | yes | **Every** header the client received, verbatim and unfiltered — SPEC.md §3.5. Names lowercased, order preserved, duplicates kept. Max 128 entries / 64 KiB. |
-| `groups` | string[] | no, default `[]` | Group ids to check. Empty is valid and means *pure authentication*. |
+| `headers` | array of `[name, value]` | yes | Every header the client received, verbatim and unfiltered (SPEC.md §3.5). Lowercased names, order preserved, duplicates retained. Limits per SPEC.md §3.4. |
+| `groups` | string[] | no, default `[]` | Group identifiers to check. |
 
-The client does **not** choose which headers matter, and this module **MUST NOT**
-offer a setting that makes it choose (SPEC.md §3.5). Picking the credential out
-of the set is the driver's job, because only the driver knows what the corp
-gateway calls it — and only the driver has to be redeployed when that changes.
+An implementation **MUST NOT** offer configuration that selects which headers
+the client sends (SPEC.md §3.5.1). Selecting the credential from the forwarded
+set is the driver's responsibility.
 
-`headers` **MUST** be present, even if empty — an absent `headers` key is
-`400 invalid_request`, not an anonymous identify. The distinction matters:
-`{"headers": []}` is "I received no credentials" (→ `401`), whereas a missing key
-is a malformed client, and conflating the two hides a broken integration behind
-what looks like a routine auth failure.
+`headers` **MUST** be present. An absent `headers` key is `400 invalid_request`.
+An empty array is valid and denotes that the client received no headers.
 
-A driver **MUST** fail `401` if a header it selects for authentication appears
-more than once (SPEC.md §3.5).
+If a header the driver selects for authentication appears more than once, the
+request **MUST** fail `401` (SPEC.md §3.5.3).
 
 ### Response `200`
 
@@ -75,75 +70,65 @@ more than once (SPEC.md §3.5).
 {
   "username": "avarma",
   "name": "Anika Varma",
-  "email": "avarma@corp.example",
+  "email": "avarma@example.internal",
   "groups": { "eng-hiring": true, "eng-all": false }
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
-| `username` | string | **Canonical** form (SPEC.md §1.3). The sidecar's assertion, not an echo. |
-| `name` | string | Display name. **MUST** be non-empty; implementations without a real one **MUST** fall back to `username`. |
-| `email` | string \| **null** | Nullable — not every directory has one. Clients **MUST** handle `null`. |
-| `groups` | object(string→bool) | One key per **distinct** requested id, echoed **byte-identically** to the request (SPEC.md §1.3). |
+| `username` | string | Canonical form (SPEC.md §1.3). |
+| `name` | string | Display name. **MUST** be non-empty; an implementation without one **MUST** substitute `username`. |
+| `email` | string \| null | Nullable. Clients **MUST** handle `null`. |
+| `groups` | object(string→bool) | One key per distinct requested identifier, echoed byte-identically (SPEC.md §1.3). |
 
-Four rules govern `groups`, all of which have bitten a previous implementation of
-a similar contract and are therefore normative and conformance-tested:
+The `groups` map obeys four rules:
 
-1. **Empty in, empty out.** `"groups": []` → `"groups": {}` with a `200`. This is
-   the pure-authentication call.
-2. **Duplicates collapse.** `["g", "g"]` → exactly one key. The response
-   **MUST NOT** contain more keys than there were distinct inputs.
-3. **Unknown group ⇒ `false`, never an error.** A client's configuration may
-   reference a group that has been deleted upstream. That grant must degrade to
-   "grants nobody access", not break every request that mentions it. Returning
-   `404` here would let one stale config entry take down an entire application.
-4. **Transitive membership counts.** If the directory nests groups, a user in a
-   child group **MUST** answer `true` for the parent. Clients cannot see the
-   hierarchy and must not have to.
+1. **Empty request, empty map.** `"groups": []` **MUST** yield `"groups": {}`
+   with status `200`, authenticating without any membership check.
+2. **Duplicates collapse.** A repeated identifier **MUST** produce exactly one
+   key. The response **MUST NOT** contain more keys than there were distinct
+   requested identifiers.
+3. **Unknown group resolves to `false`.** A group that does not exist upstream
+   **MUST** be reported as `false`. It **MUST NOT** produce an error.
+4. **Transitive membership counts.** Where the directory nests groups, a subject
+   in a child group **MUST** be reported `true` for the parent.
 
 ### Errors
 
 | Status | `code` | When |
 |---|---|---|
 | 401 | `unauthenticated` | Headers absent, malformed, expired, or failing validation. |
-| 400 | `invalid_request` | Missing `headers`, wrong types, limits exceeded. |
+| 400 | `invalid_request` | Missing `headers`, wrong types, or limits exceeded. |
 | 503 | `upstream_unavailable` | Directory unreachable or timed out. |
 
-**A `401` MUST NOT evaluate groups**, and its body **MUST NOT** hint at group
-membership. Authentication fails first and completely.
+A `401` **MUST NOT** evaluate group membership, and its body **MUST NOT**
+disclose any membership information.
 
-### The bare-header rule
+### 2.1 Unverified identity claims
 
-An implementation **MUST NOT** treat an unverified identity claim as
-authentication. A request whose `headers` contain `["x-corp-user", "alice"]` —
-a name with no accompanying token, signature, or assertion — **MUST** return
-`401`.
+An implementation **MUST NOT** derive an identity from any header it has not
+verified. A request whose headers assert a username without an accompanying
+token, signature, or assertion **MUST** return `401`.
 
-This is the single most important line in this document. Everything else here is
-a convenience; this is the security boundary. Anything on the host can set a
-header. Conformance test `identify_bare_header_rejected` enforces it by
-stripping every header matching `/token|secret|signature|assertion/i` from an
-otherwise-valid request and requiring a `401`.
+Because the client forwards every header it received (SPEC.md §3.5.1), the
+forwarded set includes headers under end-user control. The presence of a header
+therefore confers no authority. A driver **MUST** treat the forwarded set as
+untrusted input from which a credential is verified.
 
-Whole-request forwarding (SPEC.md §3.5) raises the stakes here rather than
-lowering them. The sidecar now receives every header the client received,
-including ones an end user fully controls, so "this header was present" carries
-no authority whatsoever. A driver **MUST** treat the header set as an
-untrusted bag from which it *verifies* a credential — never as a set of facts to
-read a username out of. A driver that resolves an identity from any header it
-did not cryptographically verify is non-conformant, however tempting the header
-name looks.
+Conformance test `identify_bare_header_rejected` removes every header whose name
+matches `/token|secret|signature|assertion/i` from an otherwise valid request
+and requires `401`.
 
 ---
 
 ## 3. `POST /auth/v1/users/{username}/membership`
 
-The same closed question, for a user named directly rather than authenticated.
-For administrative and auditing paths — "can the person I am about to assign
-this to actually do it?"
+Answers the same closed question for a directly named user rather than an
+authenticated one.
 
-`{username}` is percent-encoded in the path and matched canonically.
+`{username}` is percent-encoded in the path and matched canonically (SPEC.md
+§1.3).
 
 ### Request / Response
 
@@ -155,35 +140,32 @@ this to actually do it?"
 { "username": "bob", "groups": { "eng-hiring": true } }
 ```
 
-`groups` follows every rule in §2. `username` in the response is canonical.
+`groups` obeys the four rules in §2. `username` is canonical.
 
-**Consistency requirement:** for the same user and group list, this endpoint
-**MUST** return a `groups` map identical to `identify`'s. Two code paths that
-disagree about membership is a privilege-escalation bug; the conformance suite
-asserts them equal.
+For the same subject and group list, this endpoint **MUST** return a `groups`
+map identical to the one `identify` returns.
 
 ### Errors
 
 | Status | `code` | When |
 |---|---|---|
 | 404 | `not_found` | No such user upstream. |
-| 400 | `invalid_request` | Bad body or limits. |
+| 400 | `invalid_request` | Malformed body or limits exceeded. |
 | 503 | `upstream_unavailable` | Directory unreachable. |
 
-A suspended or deactivated account **MUST** still resolve here rather than
-`404`. This endpoint reports directory facts; blocking a login is the gateway's
-job at identify time, and an application's own kill switch is its own business.
-Conflating "does not exist" with "may not log in" makes audit tooling wrong.
+A suspended or deactivated account **MUST** resolve normally rather than `404`.
+This endpoint reports directory membership; account status is not in its scope.
 
-Clients **SHOULD** treat `404` as "all requested groups are false" rather than
-as a hard failure, so that a stale username in a config degrades the same way a
-stale group id does (§2 rule 3).
+Clients **SHOULD** treat `404` as equivalent to all requested groups being
+`false`.
 
 ---
 
 ## 4. `GET /auth/v1/groups/{group_id}/members`
 
-Enumerate the members of one named group. The deliberate asymmetry from §1.
+Enumerates the members of one named group (§1).
+
+`{group_id}` is percent-encoded in the path and matched canonically.
 
 ### Response `200`
 
@@ -200,23 +182,17 @@ Enumerate the members of one named group. The deliberate asymmetry from §1.
 | Field | Type | Notes |
 |---|---|---|
 | `members[].username` | string | Canonical. |
-| `members[].name` | string | Non-empty; falls back to `username`. |
-| `truncated` | bool | `true` iff the group has more members than the cap. |
+| `members[].name` | string | Non-empty; substitutes `username` when unavailable. |
+| `truncated` | bool | `true` when the group has more members than the cap. |
 
-- Members **MUST** be sorted by `username` (byte order on the canonical form),
-  so clients can diff two responses without sorting.
+- Members **MUST** be sorted by `username`, byte order on the canonical form.
 - Transitive members **MUST** be included, consistently with §2 rule 4.
-- The cap is **1000** members. Above it, return the first 1000 sorted and set
-  `truncated: true`.
+- The cap is **1000** members. Above it, an implementation **MUST** return the
+  first 1000 in sort order and **MUST** set `truncated: true`.
+- `truncated` **MUST** reflect the actual result. An implementation that applies
+  the cap while reporting `truncated: false` is non-conformant.
 
-`truncated` is a real signal and **MUST** be honest — an implementation that
-caps the list but hardcodes `truncated: false` is non-conformant. This is a
-partial *answer*, not a truncated *question*, which is why it is allowed at all
-(SPEC.md §3.4); the flag is what keeps it from being a silent lie.
-
-Note that pagination is deliberately absent. A group with more than a thousand
-members is not a paging problem to engineer around; it is a signal that the
-client is using the wrong group, and the flag is there to say so.
+This endpoint defines no pagination.
 
 ### Errors
 
@@ -225,9 +201,8 @@ client is using the wrong group, and the flag is there to say so.
 | 404 | `not_found` | No such group. |
 | 503 | `upstream_unavailable` | Directory unreachable. |
 
-Unlike a membership *check* (§2 rule 3), an unknown group **is** a `404` here:
-the group id is the entire subject of the request, so there is no useful
-degraded answer.
+An unknown group **MUST** be `404` here, in contrast to a membership check,
+where it resolves to `false` (§2 rule 3).
 
 ---
 
@@ -236,27 +211,19 @@ degraded answer.
 | Key | Default | Meaning |
 |---|---|---|
 | `auth.enabled` | `false` | Mount the module. |
-| `auth.driver` | `mock` | Which upstream implementation to use. |
-| `auth.required` | `true` | Counts toward `/readyz`. |
-| `auth.timeout_ms` | `2000` | Upstream deadline. Directories are fast; slow means broken (SPEC.md §3.3). |
+| `auth.driver` | `mock` | Upstream driver to use. |
+| `auth.required` | `true` | Counts toward `/readyz` (SPEC.md §4.2). |
+| `auth.timeout_ms` | `2000` | Upstream deadline (SPEC.md §3.3). |
 | `auth.max_groups` | `512` | SPEC.md §3.4. |
 | `auth.members_cap` | `1000` | §4. |
 
-There is deliberately **no key naming a privileged group** — no
-`auth.superadmin_group` or equivalent — and there will not be one (SPEC.md §7).
-Every group this module handles is an opaque string it looks up and reports on;
-none is special to Jetty.
-
-An application that grants blanket access to some admin group holds that fact in
-its **own** config, alongside the resources it protects, and asks about that
-group through `identify` like any other. That keeps two clients of one sidecar
-from having to agree on whose admins are special — and keeps an edit to the
-sidecar's config from silently widening access in an application nobody was
-thinking about at the time.
+This module defines no key naming a distinguished group, and an implementation
+**MUST NOT** add one (SPEC.md §7). Every group identifier it handles is opaque.
 
 ### Drivers
 
-The module is a protocol shell; a **driver** talks to a real directory.
+The module is a protocol shell; a **driver** resolves identity and membership
+against a real directory.
 
 ```python
 class AuthDriver(Protocol):
@@ -266,34 +233,25 @@ class AuthDriver(Protocol):
     async def ping(self) -> None: ...
 ```
 
-`Headers` is an ordered, duplicate-preserving sequence of `(name, value)` — not
-a mapping. The type is deliberate: a `dict` would make it impossible for a
-driver to detect the duplicate-credential case it is required to reject
-(SPEC.md §3.5), and a driver cannot opt back into safety once the information
-has been discarded at the boundary. It offers `get_all(name) -> list[str]` and
-deliberately offers no `[]` accessor, so that "there is exactly one of these"
-is a decision the driver states rather than one the container makes silently.
+`Headers` is an ordered, duplicate-preserving sequence of `(name, value)`, not a
+mapping, so that a driver can detect the condition in SPEC.md §3.5.3. It exposes
+`get_all(name) -> list[str]` and `sole(name) -> str | None`, where `sole` raises
+if the header appears more than once. It exposes no single-value indexing
+operator.
 
-**Header selection is the driver's private business.** It is the only component
-that knows which names the local gateway uses, and changing that knowledge must
-require redeploying only the driver — never reconfiguring any OSS client. A
-driver that cannot find a credential it recognises returns `None`, and the
-module answers `401`.
+Header selection is internal to the driver. Changing which header names are
+recognised **MUST NOT** require reconfiguring any client.
 
-`identify` returns `None` for "credentials did not validate" and **raises** for
-"could not reach the directory" — the module maps the former to `401` and the
-latter to `503`. Collapsing them would turn an outage into a mass logout, which
-is precisely the fail-open this specification exists to prevent.
+`identify` **MUST** return `None` when credentials fail validation and **MUST**
+raise when the directory is unreachable. The module maps the former to `401` and
+the latter to `503`; an implementation **MUST NOT** conflate them.
 
-This repository ships:
+Drivers defined alongside this document:
 
-- **`mock`** — deterministic personas from config, including nested groups. For
-  development, CI, and running the conformance suite. Its credential convention
-  is transparent by design and it **MUST NOT** be enabled in production; the
-  implementation refuses to start if `mock` is combined with a non-loopback
-  bind.
-- **`static`** — reads users/groups from a signed file. Useful for small
-  deployments with no directory at all.
+| Driver | Behaviour |
+|---|---|
+| `mock` | Deterministic subjects and nested groups from configuration, for development, CI, and conformance runs. Its credential scheme is transparent by construction; an implementation **MUST** refuse to start when `mock` is combined with a non-loopback bind. |
+| `static` | Subjects and groups read from a signed file, for deployments with no directory service. |
 
-A corp deployment supplies its own driver privately and the OSS protocol,
-module, tests and conformance suite are unchanged.
+Additional drivers implement the same Protocol without modification to this
+module, its endpoints, or the conformance suite.
