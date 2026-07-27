@@ -1,0 +1,43 @@
+# Jetty sidecar configuration. See SPEC.md.
+#
+# Nothing is enabled by default: a module runs only if it says so here.
+
+[listener]
+# Preferred transport: a unix socket, where filesystem permissions are the ACL
+# and no token has to be distributed (SPEC.md §1.5).
+uds = "/run/jetty/jetty.sock"
+uds_mode = 0o660
+
+# Loopback TCP alternative. A token is then mandatory — an unauthenticated
+# listener that answers "is alice an admin?" is a privilege-escalation
+# primitive for anything else on the box.
+#   uds = ""
+#   tcp = "127.0.0.1:7241"
+#   token = "..."   # from your secret store, never committed
+
+[log]
+level = "info"
+
+# ---------------------------------------------------------------- modules
+
+# The worked example / conformance fixture. Safe to leave on; it talks to
+# nothing. See src/jetty/modules/reference/module.py.
+[modules.reference]
+enabled = true
+
+# Specified in spec/auth-v1.md, not yet implemented. Enabling it today fails at
+# boot with "unknown module" rather than serving stub answers to auth questions
+# — which is the correct fail-closed behaviour for a security component.
+#
+#   [modules.auth]
+#   enabled = true
+#   driver = "mock"
+#   timeout_ms = 2000
+
+# Specified in spec/llmproxy-v1.md, not yet implemented.
+#
+#   [modules.llmproxy]
+#   enabled = true
+#   driver = "mock"
+#   listener = "127.0.0.1:7242"
+#   surfaces = ["openai", "anthropic", "gemini"]
