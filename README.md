@@ -46,9 +46,17 @@ uv venv && uv pip install -e '.[dev]'
 curl --unix-socket /tmp/jetty/jetty.sock http://localhost/v1/meta
 ```
 
+Tests are [absltest](https://abseil.io/docs/python/guides/testing); each file is
+also a standalone binary. Temp files, sockets and config all live under the
+directory absltest hands out, so nothing assumes a writable `/tmp`.
+
 ```sh
-pytest        # core semantics + a real process on a real socket
+.venv/bin/python tests/run_all.py         # whole suite
+.venv/bin/python tests/test_listener.py   # one file, absl flags apply
 ```
+
+`run_all.py` rather than `unittest discover`: unittest never parses absl's
+flags, so every test that asks for a temp path would fail on `--test_tmpdir`.
 
 ## Design in one page
 

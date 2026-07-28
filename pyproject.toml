@@ -12,8 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
+    "absl-py>=2.1",         # absltest: test runner plus managed temp files/dirs
     "httpx>=0.27",          # test client + the conformance suite's HTTP transport
 ]
 
@@ -26,8 +25,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jetty"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-asyncio_mode = "auto"
