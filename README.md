@@ -1,5 +1,7 @@
 # jetty
 
+[![CI](https://github.com/amrav/jetty/actions/workflows/ci.yml/badge.svg)](https://github.com/amrav/jetty/actions/workflows/ci.yml)
+
 A modular **sidecar** that lets open-source binaries talk to internal corporate
 infrastructure without knowing anything about it.
 
