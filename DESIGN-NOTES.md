@@ -134,6 +134,38 @@ is why a non-loopback bind requires an explicit opt-in rather than happening by
 copying a config. Deployments that need TCP and cannot accept that should place
 the sidecar behind something that does enforce it.
 
+## Chat is poll-first; list queries are mandatory
+
+The module emulates a chat API whose real-time delivery lives in a separate
+product family (an events subscription service plus a message queue).
+Emulating that too would import a second protocol, a push contract, and
+per-deployment infrastructure into a sidecar whose surface is otherwise
+co-located HTTP — so inbound delivery is polling, deliberately.
+
+That decision is only honest if polling is efficient on every implementation.
+A poller's one query is "the newest N messages since T", which needs `filter`
+on `createTime` and `orderBy … DESC` on the list method. The emulated API has
+both, but a subset could have left them out — and optional query support would
+hand every polling client a per-implementation fallback (paginate a space's
+whole history each cycle), exactly the compatibility matrix a sidecar exists
+to delete. So they are mandatory.
+
+## Chat: read fidelity is enumerated
+
+The emulated message resource has dozens of fields, and drivers translate from
+systems that have only some of them. Which fields matter is a fact about
+clients: one keys an authorization decision on `sender`, reply context on the
+quoted-message snapshot, routing on `thread.name`. A driver that silently
+omits one degrades such a client invisibly — the message still arrives, the
+feature built on the field just stops working. That is §1.2's forbidden shape
+(a `200` carrying an assumed result) at field granularity, so the spec draws
+the conformance line explicitly: the enumerated fields are the ones a client
+may build on.
+
+`sender` gets the strictest wording because clients compare it verbatim — an
+implementation that "helpfully" normalised or synthesised sender values would
+quietly defeat any policy keyed on them.
+
 ## Implementation notes
 
 Two behaviours in the reference implementation exist because of specific
