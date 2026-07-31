@@ -39,8 +39,25 @@ enabled = true
 #   listener = "127.0.0.1:7242"
 #   surfaces = ["openai", "anthropic", "gemini"]
 
-# Specified in spec/chat-v1.md, not yet implemented.
+# Google Chat API v1 subset over a pluggable driver. See spec/chat-v1.md.
+# This build ships the `mock` driver (in-memory, seedable — development, CI,
+# conformance); `passthrough` is specified but not yet implemented.
 #
 #   [modules.chat]
 #   enabled = true
 #   driver = "mock"
+#   upload_max_bytes = 26214400
+#   # The service identity that created messages are attributed to (§2).
+#   identity = "users/jetty"
+#
+#   # Mock driver seeding: spaces, members, and messages that exist at boot.
+#   [[modules.chat.seed.spaces]]
+#   id = "sandbox"
+#   display_name = "Sandbox"
+#   space_type = "SPACE"
+#   members = ["users/operator"]
+#
+#   [[modules.chat.seed.messages]]
+#   space = "sandbox"
+#   sender = "users/operator"
+#   text = "hello from the seed"
