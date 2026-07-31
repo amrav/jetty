@@ -144,8 +144,6 @@ def create_app(config: Config) -> FastAPI:
 
     app.include_router(_core_router(state))
     for module in modules:
-        app.include_router(
-            module.router(), prefix=f"{module.mount}/{module.api_version}"
-        )
+        app.include_router(module.router(), prefix=module.router_prefix)
 
     return app

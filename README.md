@@ -31,6 +31,7 @@ details stay internal.
 | `reference` module (worked example + test fixture) | **Implemented, tested** |
 | `auth` module ([`spec/auth-v1.md`](spec/auth-v1.md)) | Specified, not implemented |
 | `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
+| `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `filesystem`, `xmanager` | Names reserved only |
 
 Enabling an unimplemented module fails at boot with `unknown module` rather than

@@ -224,3 +224,5 @@ module or its surface.
 | `chat.enabled` | `false` | Mount the module. |
 | `chat.driver` | `mock` | Upstream driver to use. |
 | `chat.upload_max_bytes` | `26214400` | §3.7 cap (25 MiB). |
+| `chat.identity` | `users/jetty` | The service identity created messages are attributed to (§2). |
+| `chat.seed` | empty | Mock-driver seed data: `seed.spaces` (id, display_name, space_type, members) and `seed.messages` (space, sender, text). Other drivers ignore it. |

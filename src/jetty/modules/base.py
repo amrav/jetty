@@ -39,9 +39,20 @@ class Module(abc.ABC):
     def mount(self) -> str:
         return f"/{self.name}"
 
+    @property
+    def router_prefix(self) -> str:
+        """Where the core mounts `router()`.
+
+        The default is the SPEC.md §5 layout. A module serving a foreign
+        protocol under its mount prefix (SPEC.md §2.1) overrides this to
+        `self.mount` and lays out the foreign URL space — including its own
+        version segments — inside its router.
+        """
+        return f"{self.mount}/{self.api_version}"
+
     @abc.abstractmethod
     def router(self) -> APIRouter:
-        """Endpoints, mounted under `/{name}/{api_version}`."""
+        """Endpoints, mounted under `router_prefix`."""
 
     def meta(self) -> dict[str, Any]:
         """This module's entry in `GET /v1/meta` (SPEC.md §4.2)."""

@@ -85,6 +85,13 @@ def _register_builtins() -> None:
 
     register("reference", _reference)
 
+    def _chat(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.chat.module import ChatModule
+
+        return ChatModule(settings)
+
+    register("chat", _chat)
+
     # `auth` and `llmproxy` are specified in spec/ and not yet implemented.
     # They are deliberately NOT registered: naming them here before they exist
     # would let `enabled = true` boot a sidecar that answers auth questions
