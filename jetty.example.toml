@@ -23,6 +23,14 @@ level = "info"
 [modules.reference]
 enabled = true
 
+# Read-only Mercurial API over one local repository (spec/hg-v1.md). Serves
+# history, diffs, status and file content; defines no mutating endpoint.
+# `repo` is required and machine-specific, hence disabled here.
+#
+#   [modules.hg]
+#   enabled = true
+#   repo = "/path/to/repository"
+
 # Specified in spec/auth-v1.md, not yet implemented. Enabling it today fails at
 # boot with "unknown module" rather than serving stub answers to auth questions
 # — which is the correct fail-closed behaviour for a security component.
