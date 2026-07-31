@@ -47,7 +47,9 @@ Consequently:
   it to the driver or any upstream (SPEC.md §1.4 applies to it regardless).
 - The module defines no per-caller identity. Where the emulated API attributes
   an action to the calling user, the attribution is the driver's concern
-  (e.g. a configured service identity).
+  (e.g. a configured service identity). Messages created through this surface
+  carry that identity as their `sender`; reads report `sender` exactly as the
+  upstream records it, never a value the implementation synthesises.
 
 ---
 
@@ -87,6 +89,10 @@ resource names, never bare IDs.
 List and search methods support the emulated API's `pageSize` and `pageToken`
 parameters and return `nextPageToken` when more results exist.
 
+Message `text`, in both directions, uses the emulated API's app-message
+formatting markup. The driver renders it upstream with equivalent semantics; a
+construct the upstream cannot render follows §3.5.
+
 ### 3.1 Threading and replies
 
 `spaces.messages.create` supports the emulated API's threading contract:
@@ -103,7 +109,19 @@ parameters and return `nextPageToken` when more results exist.
   of the quoted message, and a message may only quote a message in the same
   thread or a root message.
 
-### 3.2 Search
+### 3.2 Listing messages
+
+`spaces.messages.list` supports the emulated API's `filter` and `orderBy`
+parameters, and an implementation **MUST** honour both:
+
+- `filter` — comparisons on `createTime` (RFC-3339 timestamps with `>` and
+  `<`) and equality on `thread.name` (one thread per query), combinable with
+  `AND`. A filter naming any other field is the emulated `INVALID_ARGUMENT`
+  error.
+- `orderBy` — `createTime ASC` (the emulated API's default) or
+  `createTime DESC`.
+
+### 3.3 Search
 
 `spaces.messages.search` follows the emulated API: the path's parent segment
 **MUST** be the literal `spaces/-` (search spans every space visible to the
@@ -111,20 +129,40 @@ service; any other parent is the emulated `INVALID_ARGUMENT` error), and the
 request body carries a required `filter` string, with optional `pageSize`,
 `pageToken`, and `orderBy` (`createTime` ascending/descending).
 
-### 3.3 Editing
+### 3.4 Editing
 
 `spaces.messages.patch` applies the fields named in the `updateMask` query
 parameter. An implementation **MUST** support `updateMask=text`; other paths
-are optional and follow §3.4 when unsupported.
+are optional and follow §3.5 when unsupported.
 
-### 3.4 Translation fidelity
+### 3.5 Translation fidelity
 
 If a request specifies a field or parameter the driver cannot honour, the
 implementation **MUST** reject the request with the emulated API's
 `INVALID_ARGUMENT` error, naming the field. It **MUST NOT** drop, substitute,
 or approximate it, and **MUST NOT** offer a mode that does so.
 
-### 3.5 Uploads
+### 3.6 Read fidelity
+
+Every message a response carries — from list, search, get, create, or patch —
+**MUST** include the following fields whenever the upstream records them:
+
+| Field | Notes |
+|---|---|
+| `name` | Full resource name (§3). |
+| `sender.name`, `sender.type` | As the upstream records them (§2). |
+| `thread.name` | The containing thread. |
+| `text` | The message body, in the §3 markup. |
+| `createTime`, `lastUpdateTime` | RFC-3339 timestamps. |
+| `attachment[]` | With `contentName` and `contentType`. |
+| `quotedMessageMetadata` | Including `quotedMessageSnapshot.text` when the emulated API supplies a snapshot. |
+
+An implementation **MUST NOT** omit, blank, or approximate one of these fields
+when the upstream provides it; a field the upstream genuinely lacks is absent,
+per the emulated API. Spaces are held to the same rule for `name`,
+`displayName`, and `spaceType`.
+
+### 3.7 Uploads
 
 `media.upload` accepts the emulated API's upload protocol on the
 `/chat/upload/v1` path and returns an `attachmentDataRef` usable in a subsequent
@@ -146,7 +184,7 @@ class ChatDriver(Protocol):
     async def create_space(self, req: SpaceCreate) -> Space: ...
     async def find_direct_message(self, user: str) -> Space | None: ...
     async def list_members(self, space: str, page: Page) -> MemberPage: ...
-    async def list_messages(self, space: str, page: Page) -> MessagePage: ...
+    async def list_messages(self, space: str, query: MessageQuery) -> MessagePage: ...
     async def get_message(self, name: str) -> Message | None: ...
     async def create_message(self, space: str, req: MessageCreate) -> Message: ...
     async def patch_message(self, name: str, patch: MessagePatch) -> Message | None: ...
@@ -158,6 +196,9 @@ class ChatDriver(Protocol):
     async def upload_attachment(self, space: str, upload: Upload) -> AttachmentRef: ...
     async def ping(self) -> None: ...
 ```
+
+`MessageQuery` carries §3.2's constraints beside pagination: the `createTime`
+bounds, the thread, and the ordering.
 
 A driver returns `None`/`False` for a resource that does not exist and raises
 for an unreachable upstream. The surface maps the former to the emulated
@@ -182,4 +223,4 @@ module or its surface.
 |---|---|---|
 | `chat.enabled` | `false` | Mount the module. |
 | `chat.driver` | `mock` | Upstream driver to use. |
-| `chat.upload_max_bytes` | `26214400` | §3.5 cap (25 MiB). |
+| `chat.upload_max_bytes` | `26214400` | §3.7 cap (25 MiB). |
