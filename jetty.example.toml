@@ -38,3 +38,9 @@ enabled = true
 #   driver = "mock"
 #   listener = "127.0.0.1:7242"
 #   surfaces = ["openai", "anthropic", "gemini"]
+
+# Specified in spec/chat-v1.md, not yet implemented.
+#
+#   [modules.chat]
+#   enabled = true
+#   driver = "mock"

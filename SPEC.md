@@ -101,6 +101,11 @@ protocol whose URL layout would collide with this one. Foreign-protocol
 listeners are outside the scope of this document except that §1 continues to
 apply to them.
 
+A module **MAY** instead serve a foreign protocol under its own mount prefix
+on the control listener, when prefixing does not break that protocol's
+clients. Such routes carry the foreign protocol's semantics — including its
+error shape, in place of §3 — and §1 continues to apply to them.
+
 | Listener | Default | Carries |
 |---|---|---|
 | control | `unix:/tmp/jetty/jetty.sock` | This specification |
@@ -271,6 +276,7 @@ Modules defined alongside this document:
 |---|---|---|
 | `auth` | `spec/auth-v1.md` | Identity assertion and group membership |
 | `llmproxy` | `spec/llmproxy-v1.md` | LLM API surfaces over a pluggable driver |
+| `chat` | `spec/chat-v1.md` | Google Chat API subset over a pluggable driver |
 
 `filesystem` and `xmanager` are reserved names with no specification yet.
 
