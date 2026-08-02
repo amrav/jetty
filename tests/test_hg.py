@@ -31,7 +31,8 @@ _ENV = dict(os.environ, HGPLAIN="1", HGRCPATH="")
 
 @absltest.skipUnless(_HG, "no hg executable available")
 class HgModuleTest(absltest.TestCase):
-    """One seeded repo per test, shaped to exercise every status code:
+    """One root with a seeded `widget` repo per test, shaped to exercise
+    every status code:
 
     rev 0  a.txt, sub/b.txt added
     rev 1  a.txt modified; c.txt added; a2.txt copied from a.txt;
@@ -45,7 +46,9 @@ class HgModuleTest(absltest.TestCase):
         self.socket_path = os.path.join(
             self.create_tempdir().full_path, "jetty.sock"
         )
-        self.repo = self.create_tempdir().full_path
+        self.root = self.create_tempdir().full_path
+        self.repo = os.path.join(self.root, "widget")
+        os.makedirs(self.repo)
         self._hg("init")
         self._write("a.txt", "alpha v1\n")
         self._write("sub/b.txt", "bee\n")
@@ -63,10 +66,10 @@ class HgModuleTest(absltest.TestCase):
         self._write("untracked.txt", "stray\n")
         self.node0, self.node1 = self._nodes()
 
-    def _hg(self, *args: str) -> str:
+    def _hg(self, *args: str, repo: str | None = None) -> str:
         proc = subprocess.run(
             [_HG, *args],
-            cwd=self.repo,
+            cwd=repo or self.repo,
             env=_ENV,
             check=True,
             capture_output=True,
@@ -89,17 +92,23 @@ class HgModuleTest(absltest.TestCase):
         return self._hg("log", "-T", "{node}\n", "-r", "0:1").splitlines()
 
     def build(self, **overrides) -> TestClient:
-        settings = {"enabled": True, "repo": self.repo, "hg_bin": _HG, **overrides}
+        settings = {"enabled": True, "root": self.root, "hg_bin": _HG, **overrides}
         cfg = Config.model_validate(
             {"listener": {"uds": self.socket_path}, "modules": {"hg": settings}}
         )
         return TestClient(create_app(cfg))
 
+    @staticmethod
+    def get(c: TestClient, url: str, **params):
+        """Every endpoint takes `repo` (spec §2a); default the seeded one."""
+        params.setdefault("repo", "widget")
+        return c.get(url, params=params)
+
     # --- /repo -----------------------------------------------------------
 
     def test_repo_summary(self):
         with self.build() as c:
-            body = c.get("/hg/v1/repo").json()
+            body = self.get(c, "/hg/v1/repo").json()
         self.assertEqual(body["tip"], self.node1)
         self.assertEqual(body["wdir_parents"], [self.node1])
         self.assertEqual(body["branch"], "default")
@@ -111,13 +120,71 @@ class HgModuleTest(absltest.TestCase):
         # untracked.txt survives the revert; d.txt's add was reverted so its
         # on-disk copy is now untracked too. Neither makes the checkout dirty.
         with self.build() as c:
-            self.assertFalse(c.get("/hg/v1/repo").json()["dirty"])
+            self.assertFalse(self.get(c, "/hg/v1/repo").json()["dirty"])
+
+    # --- repository addressing (spec §2a) --------------------------------
+
+    def test_one_sidecar_serves_many_repos(self):
+        other = os.path.join(self.root, "team", "gadget")
+        os.makedirs(other)
+        self._hg("init", repo=other)
+        with open(os.path.join(other, "only.txt"), "w") as f:
+            f.write("gadget\n")
+        self._hg("add", "-q", "only.txt", repo=other)
+        self._hg(
+            "commit", "-q", "-m", "gadget first",
+            "-u", "Carol <c@example.com>", "-d", "30 0", repo=other,
+        )
+        with self.build() as c:
+            widget = self.get(c, "/hg/v1/repo").json()
+            gadget = self.get(c, "/hg/v1/repo", repo="team/gadget").json()
+            files = self.get(c, "/hg/v1/status", repo="team/gadget").json()
+        self.assertNotEqual(widget["tip"], gadget["tip"])
+        self.assertFalse(gadget["dirty"])
+        self.assertEqual(files["files"], [])
+
+    def test_unknown_repo_is_not_found(self):
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/repo", repo="nope")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"]["code"], "not_found")
+
+    def test_repo_not_a_repository_is_not_found(self):
+        os.makedirs(os.path.join(self.root, "plain-dir"))
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/status", repo="plain-dir")
+        self.assertEqual(r.status_code, 404)
+
+    def test_traversing_repo_is_rejected(self):
+        with self.build() as c:
+            for repo in ("../elsewhere", "/etc", "a/../../b", "a/./b", ""):
+                r = c.get("/hg/v1/repo", params={"repo": repo})
+                self.assertEqual(r.status_code, 400, repo)
+                self.assertEqual(
+                    r.json()["error"]["code"], "invalid_request", repo
+                )
+
+    def test_symlink_out_of_the_root_is_rejected(self):
+        """Containment is on the RESOLVED path: a symlink under the root
+        pointing outside it must not become a door out (spec §2a)."""
+        outside = self.create_tempdir().full_path
+        self._hg("init", repo=outside)
+        os.symlink(outside, os.path.join(self.root, "escape"))
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/repo", repo="escape")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"]["code"], "invalid_request")
+
+    def test_missing_repo_param_is_rejected(self):
+        with self.build() as c:
+            r = c.get("/hg/v1/repo")
+        self.assertEqual(r.status_code, 400)
 
     # --- /changesets -----------------------------------------------------
 
     def test_log_newest_first_with_full_nodes(self):
         with self.build() as c:
-            body = c.get("/hg/v1/changesets").json()
+            body = self.get(c, "/hg/v1/changesets").json()
         self.assertEqual(
             [e["node"] for e in body["changesets"]], [self.node1, self.node0]
         )
@@ -131,30 +198,30 @@ class HgModuleTest(absltest.TestCase):
 
     def test_log_pagination_cursor(self):
         with self.build() as c:
-            first = c.get("/hg/v1/changesets", params={"limit": 1}).json()
+            first = self.get(c, "/hg/v1/changesets", limit=1).json()
             self.assertEqual([e["node"] for e in first["changesets"]], [self.node1])
             self.assertEqual(first["next"], self.node0)
-            second = c.get(
-                "/hg/v1/changesets", params={"limit": 1, "start": first["next"]}
+            second = self.get(
+                c, "/hg/v1/changesets", limit=1, start=first["next"]
             ).json()
         self.assertEqual([e["node"] for e in second["changesets"]], [self.node0])
         self.assertIsNone(second["next"])
 
     def test_log_path_filter(self):
         with self.build() as c:
-            body = c.get("/hg/v1/changesets", params={"path": "c.txt"}).json()
+            body = self.get(c, "/hg/v1/changesets", path="c.txt").json()
         self.assertEqual([e["node"] for e in body["changesets"]], [self.node1])
 
     def test_log_user_filter(self):
         with self.build() as c:
-            body = c.get("/hg/v1/changesets", params={"user": "Alice"}).json()
+            body = self.get(c, "/hg/v1/changesets", user="Alice").json()
         self.assertEqual([e["node"] for e in body["changesets"]], [self.node0])
 
     # --- /changesets/{rev} -----------------------------------------------
 
     def test_changeset_detail_files_and_copies(self):
         with self.build() as c:
-            body = c.get("/hg/v1/changesets/tip").json()
+            body = self.get(c, "/hg/v1/changesets/tip").json()
         self.assertEqual(body["node"], self.node1)
         by_path = {f["path"]: f for f in body["files"]}
         self.assertEqual(by_path["a.txt"]["status"], "M")
@@ -166,14 +233,14 @@ class HgModuleTest(absltest.TestCase):
 
     def test_short_prefix_resolves_and_response_carries_full_node(self):
         with self.build() as c:
-            body = c.get(f"/hg/v1/changesets/{self.node0[:8]}").json()
+            body = self.get(c, f"/hg/v1/changesets/{self.node0[:8]}").json()
         self.assertEqual(body["node"], self.node0)
 
     # --- /changesets/{rev}/diff ------------------------------------------
 
     def test_diff_is_git_style(self):
         with self.build() as c:
-            r = c.get("/hg/v1/changesets/tip/diff")
+            r = self.get(c, "/hg/v1/changesets/tip/diff")
         self.assertEqual(r.status_code, 200)
         self.assertIn("text/x-diff", r.headers["content-type"])
         self.assertIn("diff --git a/a.txt b/a.txt", r.text)
@@ -181,9 +248,7 @@ class HgModuleTest(absltest.TestCase):
 
     def test_diff_narrowed_to_one_path(self):
         with self.build() as c:
-            text = c.get(
-                "/hg/v1/changesets/tip/diff", params={"path": "a.txt"}
-            ).text
+            text = self.get(c, "/hg/v1/changesets/tip/diff", path="a.txt").text
         self.assertIn("a.txt", text)
         self.assertNotIn("c.txt", text)
 
@@ -193,7 +258,7 @@ class HgModuleTest(absltest.TestCase):
         """The A / ? split: added-and-tracked is not the same answer as
         present-but-untracked, and both differ from committed (absent)."""
         with self.build() as c:
-            files = c.get("/hg/v1/status").json()["files"]
+            files = self.get(c, "/hg/v1/status").json()["files"]
         by_path = {f["path"]: f["status"] for f in files}
         self.assertEqual(
             by_path, {"c.txt": "M", "d.txt": "A", "untracked.txt": "?"}
@@ -201,8 +266,8 @@ class HgModuleTest(absltest.TestCase):
 
     def test_status_between_two_revisions(self):
         with self.build() as c:
-            files = c.get(
-                "/hg/v1/status", params={"from": "0", "to": "1"}
+            files = self.get(
+                c, "/hg/v1/status", **{"from": "0", "to": "1"}
             ).json()["files"]
         by_path = {f["path"]: f["status"] for f in files}
         self.assertEqual(
@@ -212,29 +277,35 @@ class HgModuleTest(absltest.TestCase):
 
     def test_status_to_without_from_means_what_that_rev_changed(self):
         with self.build() as c:
-            pair = c.get(
-                "/hg/v1/status", params={"from": "0", "to": "1"}
+            pair = self.get(
+                c, "/hg/v1/status", **{"from": "0", "to": "1"}
             ).json()
-            change = c.get("/hg/v1/status", params={"to": "1"}).json()
+            change = self.get(c, "/hg/v1/status", to="1").json()
         self.assertEqual(change, pair)
 
     # --- /files ----------------------------------------------------------
 
     def test_file_content_at_each_revision(self):
         with self.build() as c:
-            self.assertEqual(c.get("/hg/v1/files/0/a.txt").text, "alpha v1\n")
-            self.assertEqual(c.get("/hg/v1/files/1/a.txt").text, "alpha v2\n")
+            self.assertEqual(
+                self.get(c, "/hg/v1/files/0/a.txt").text, "alpha v1\n"
+            )
+            self.assertEqual(
+                self.get(c, "/hg/v1/files/1/a.txt").text, "alpha v2\n"
+            )
             # Committed content, not the working directory's modification.
-            self.assertEqual(c.get("/hg/v1/files/tip/c.txt").text, "cee v1\n")
+            self.assertEqual(
+                self.get(c, "/hg/v1/files/tip/c.txt").text, "cee v1\n"
+            )
 
     def test_file_content_guesses_media_type(self):
         with self.build() as c:
-            r = c.get("/hg/v1/files/0/a.txt")
+            r = self.get(c, "/hg/v1/files/0/a.txt")
         self.assertIn("text/plain", r.headers["content-type"])
 
     def test_file_untracked_at_revision_is_not_found(self):
         with self.build() as c:
-            r = c.get("/hg/v1/files/0/c.txt")  # exists only from rev 1
+            r = self.get(c, "/hg/v1/files/0/c.txt")  # exists only from rev 1
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"]["code"], "not_found")
 
@@ -247,7 +318,7 @@ class HgModuleTest(absltest.TestCase):
                 "/hg/v1/changesets/zzzzz/diff",
                 "/hg/v1/files/zzzzz/a.txt",
             ):
-                r = c.get(url)
+                r = self.get(c, url)
                 self.assertEqual(r.status_code, 404, url)
                 self.assertEqual(r.json()["error"]["code"], "not_found", url)
 
@@ -255,15 +326,15 @@ class HgModuleTest(absltest.TestCase):
         """The charset gate (spec §2): operators must never reach a revset."""
         with self.build() as c:
             for rev in ("tip~1", "0:1", "all()", "tip or 0", "'0'"):
-                r = c.get("/hg/v1/changesets", params={"start": rev})
+                r = self.get(c, "/hg/v1/changesets", start=rev)
                 self.assertEqual(r.status_code, 400, rev)
                 self.assertEqual(r.json()["error"]["code"], "invalid_request", rev)
 
     def test_traversing_path_is_rejected(self):
         with self.build() as c:
-            r = c.get("/hg/v1/files/0/../secrets")
+            r = self.get(c, "/hg/v1/files/0/../secrets")
             self.assertEqual(r.status_code, 400)
-            r = c.get("/hg/v1/changesets", params={"path": "a/../../etc"})
+            r = self.get(c, "/hg/v1/changesets", path="a/../../etc")
             self.assertEqual(r.status_code, 400)
 
     # --- lifecycle -------------------------------------------------------
@@ -273,11 +344,11 @@ class HgModuleTest(absltest.TestCase):
             {"listener": {"uds": self.socket_path}, "modules": {}}
         )
         with TestClient(create_app(cfg)) as c:
-            r = c.get("/hg/v1/repo")
+            r = c.get("/hg/v1/repo", params={"repo": "widget"})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"]["code"], "module_disabled")
 
-    def test_missing_repo_setting_fails_at_build(self):
+    def test_missing_root_setting_fails_at_build(self):
         cfg = Config.model_validate(
             {
                 "listener": {"uds": self.socket_path},
@@ -294,17 +365,20 @@ class HgModuleTest(absltest.TestCase):
                     {
                         "listener": {"uds": self.socket_path},
                         "modules": {
-                            "hg": {"enabled": True, "repo": self.repo, "rep0": "x"}
+                            "hg": {"enabled": True, "root": self.root, "rep0": "x"}
                         },
                     }
                 )
             )
 
-    def test_non_repository_aborts_boot(self):
+    def test_missing_root_directory_aborts_boot(self):
         """SPEC.md §1.2: serve correctly or refuse to start."""
-        not_a_repo = self.create_tempdir().full_path
-        with self.assertRaisesRegex(RuntimeError, "cannot open repository"):
-            self.build(repo=not_a_repo).__enter__()
+        with self.assertRaisesRegex(RuntimeError, "not a directory"):
+            self.build(root=os.path.join(self.root, "absent")).__enter__()
+
+    def test_unrunnable_hg_bin_aborts_boot(self):
+        with self.assertRaisesRegex(RuntimeError, "cannot run"):
+            self.build(hg_bin="/nonexistent/hg").__enter__()
 
 
 if __name__ == "__main__":

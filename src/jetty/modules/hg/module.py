@@ -1,4 +1,10 @@
-"""The `hg` module — a read-only window onto one local Mercurial repository.
+"""The `hg` module — a read-only window onto Mercurial repositories under
+one configured root.
+
+Every request names its repository (`?repo=<relative path under root>`);
+`_resolve` is the only door, and it containment-checks the resolved path
+before any hg invocation. The root is the module's whole authority: nothing
+outside it is reachable regardless of what a request asks for.
 
 Spec: spec/hg-v1.md. The whole module is a thin, careful shell around the
 `hg` binary:
@@ -45,8 +51,10 @@ class HgSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    #: Absolute path of the repository to serve. Required.
-    repo: str
+    #: Directory whose subdirectories are the servable repositories. Every
+    #: request names one with `?repo=<relative path>`; nothing outside this
+    #: root is ever reachable (spec/hg-v1.md §3). Required.
+    root: str
     #: The Mercurial executable. Overridable for hermetic test/CI installs.
     hg_bin: str = "hg"
 
@@ -134,23 +142,63 @@ class HgModule(Module):
     def __init__(self, settings: Mapping[str, Any]) -> None:
         super().__init__(settings)
         self.cfg = HgSettings.model_validate(dict(settings))
-        self._root: str | None = None
 
     async def startup(self) -> None:
-        """Open the repo once; an unreadable repo must abort boot, not serve
-        503s forever (SPEC.md §1.2)."""
-        try:
-            self._root = self._run("root").decode().strip()
-        except JettyError as e:
+        """Prove the root and the binary once; a misconfiguration must abort
+        boot, not serve 503s forever (SPEC.md §1.2). Individual repos are
+        checked per request — they come and go while the sidecar runs."""
+        if not os.path.isdir(self.cfg.root):
             raise RuntimeError(
-                f"hg module: cannot open repository {self.cfg.repo!r}: {e.message}"
+                f"hg module: root {self.cfg.root!r} is not a directory"
+            )
+        try:
+            subprocess.run(
+                [self.cfg.hg_bin, "--version"], check=True, timeout=_TIMEOUT_S,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=dict(os.environ, HGPLAIN="1", HGRCPATH=""),
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(
+                f"hg module: cannot run {self.cfg.hg_bin!r}: {e}"
             ) from e
 
-    def _run(self, *args: str) -> bytes:
+    def _resolve(self, repo: str) -> str:
+        """`?repo=` → an absolute repository path, or a refusal.
+
+        The param is a relative path under the configured root — same
+        segment rules as file paths (no absolute, no `..`, no empties) —
+        and the RESOLVED path must still sit under the resolved root, so a
+        symlink inside the root cannot become a door out of it. Unknown or
+        non-repository directories are `not_found`; a path that tries to
+        leave the root is the client's bug, `invalid_request`.
+        """
+        if (
+            not repo
+            or repo.startswith("/")
+            or "\\" in repo
+            or any(seg in ("", ".", "..") for seg in repo.split("/"))
+        ):
+            raise JettyError(
+                ErrorCode.INVALID_REQUEST, f"invalid repository name {repo!r}"
+            )
+        root = os.path.realpath(self.cfg.root)
+        path = os.path.realpath(os.path.join(root, repo))
+        if path != root and not path.startswith(root + os.sep):
+            raise JettyError(
+                ErrorCode.INVALID_REQUEST,
+                f"repository {repo!r} resolves outside the configured root",
+            )
+        if not os.path.isdir(os.path.join(path, ".hg")):
+            raise JettyError(
+                ErrorCode.NOT_FOUND, f"unknown repository {repo!r}"
+            )
+        return path
+
+    def _run(self, repo_path: str, *args: str) -> bytes:
         env = dict(os.environ, HGPLAIN="1", HGRCPATH="")
         try:
             proc = subprocess.run(
-                [self.cfg.hg_bin, "-R", self.cfg.repo, "--noninteractive", *args],
+                [self.cfg.hg_bin, "-R", repo_path, "--noninteractive", *args],
                 capture_output=True,
                 timeout=_TIMEOUT_S,
                 env=env,
@@ -168,25 +216,29 @@ class HgModule(Module):
             raise _failure(proc.stderr)
         return proc.stdout
 
-    def _log_json(self, *args: str) -> list[dict[str, Any]]:
-        entries = json.loads(self._run("log", "-T", "json", *args))
+    def _log_json(self, repo_path: str, *args: str) -> list[dict[str, Any]]:
+        entries = json.loads(self._run(repo_path, "log", "-T", "json", *args))
         # An empty repo materialises the null changeset for revsets like
         # `ancestors(tip)`; it is not a changeset a client should ever see.
         return [e for e in entries if e["node"] != _NULL_NODE]
 
     # Handlers are deliberately sync (`def`): FastAPI runs them in its
-    # threadpool, so a slow `hg` never parks the event loop.
+    # threadpool, so a slow `hg` never parks the event loop. Every handler
+    # takes `repo` — which repository under the configured root — and
+    # resolves it first, so no hg invocation can precede the containment
+    # check.
     def router(self) -> APIRouter:
         router = APIRouter()
 
         @router.get("/repo")
-        def repo() -> dict[str, Any]:
-            tip = self._log_json("-l", "1")
-            parents = self._log_json("-r", "parents()")
-            branch = self._run("branch").decode().strip()
-            changed = json.loads(self._run("status", "-T", "json"))
+        def repo_summary(repo: str) -> dict[str, Any]:
+            target = self._resolve(repo)
+            tip = self._log_json(target, "-l", "1")
+            parents = self._log_json(target, "-r", "parents()")
+            branch = self._run(target, "branch").decode().strip()
+            changed = json.loads(self._run(target, "status", "-T", "json"))
             return {
-                "root": self._root or self.cfg.repo,
+                "root": target,
                 "tip": tip[0]["node"] if tip else None,
                 "wdir_parents": [e["node"] for e in parents],
                 "branch": branch,
@@ -197,11 +249,13 @@ class HgModule(Module):
 
         @router.get("/changesets")
         def changesets(
+            repo: str,
             start: str = "tip",
             path: str | None = None,
             user: str | None = None,
             limit: int = Query(default=50, ge=1, le=200),
         ) -> dict[str, Any]:
+            target = self._resolve(repo)
             _check_rev(start)
             args = [
                 "-r",
@@ -213,7 +267,7 @@ class HgModule(Module):
                 args += ["-u", user]
             if path is not None:
                 args += ["--", "path:" + _check_path(path)]
-            entries = self._log_json(*args)
+            entries = self._log_json(target, *args)
             page = entries[:limit]
             return {
                 "changesets": [_changeset(e) for e in page],
@@ -223,31 +277,39 @@ class HgModule(Module):
             }
 
         @router.get("/changesets/{rev}")
-        def changeset(rev: str) -> dict[str, Any]:
-            entries = self._log_json("-r", _check_rev(rev))
+        def changeset(rev: str, repo: str) -> dict[str, Any]:
+            target = self._resolve(repo)
+            entries = self._log_json(target, "-r", _check_rev(rev))
             if not entries:
                 raise JettyError(ErrorCode.NOT_FOUND, f"unknown revision {rev!r}")
             result = _changeset(entries[0])
-            result["files"] = _status_files(
-                self._run("status", "--change", result["node"], "-C", "-T", "json")
-            )
+            result["files"] = _status_files(self._run(
+                target, "status", "--change", result["node"], "-C", "-T", "json"
+            ))
             return result
 
         @router.get("/changesets/{rev}/diff")
-        def changeset_diff(rev: str, path: str | None = None) -> Response:
+        def changeset_diff(
+            rev: str, repo: str, path: str | None = None
+        ) -> Response:
+            target = self._resolve(repo)
             args = ["diff", "-c", _check_rev(rev), "--git"]
             if path is not None:
                 args += ["--", "path:" + _check_path(path)]
-            return Response(content=self._run(*args), media_type="text/x-diff")
+            return Response(
+                content=self._run(target, *args), media_type="text/x-diff"
+            )
 
         @router.get("/status")
         def status(
+            repo: str,
             from_: str | None = Query(default=None, alias="from"),
             to: str | None = None,
         ) -> dict[str, Any]:
             """File states between two revisions, or against the working
             directory. Defaults answer the 90% question: what is uncommitted?
             """
+            target = self._resolve(repo)
             args = ["status", "-C", "-T", "json"]
             wdir = to is None or to == "wdir"
             if from_ is not None:
@@ -258,12 +320,14 @@ class HgModule(Module):
                 # No `from`: default to the target's parent, i.e. "what did
                 # this revision change" — same answer as /changesets/{rev}.
                 args += ["--change", _check_rev(to)]
-            return {"files": _status_files(self._run(*args))}
+            return {"files": _status_files(self._run(target, *args))}
 
         @router.get("/files/{rev}/{file_path:path}")
-        def file_content(rev: str, file_path: str) -> Response:
+        def file_content(rev: str, file_path: str, repo: str) -> Response:
+            target = self._resolve(repo)
             content = self._run(
-                "cat", "-r", _check_rev(rev), "--", "path:" + _check_path(file_path)
+                target,
+                "cat", "-r", _check_rev(rev), "--", "path:" + _check_path(file_path),
             )
             media = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
             return Response(content=content, media_type=media)

@@ -3,11 +3,16 @@
 Mount: `/hg/v1` on the control listener
 Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
-The `hg` module exposes a **read-only** view of one local Mercurial
-repository: its history, the content of any file at any revision, and the
-state of the working directory. It exists so an OSS binary can ask VCS
-questions without carrying a Mercurial client, a repo path, or knowledge of
-the host's VCS configuration.
+The `hg` module exposes a **read-only** view of the local Mercurial
+repositories under one configured root directory: their history, the
+content of any file at any revision, and the state of the working
+directory. It exists so an OSS binary can ask VCS questions without
+carrying a Mercurial client, filesystem access, or knowledge of the host's
+VCS configuration.
+
+Every request names its repository with the `repo` parameter (§2a); the
+configured root is the module's entire filesystem authority, and nothing
+outside it is reachable regardless of what a request asks for.
 
 It is read-only as a matter of protocol, not of politeness: v1 defines no
 endpoint that mutates the repository, the store, or the working directory,
@@ -49,18 +54,36 @@ An ambiguous short prefix is `400 invalid_request`. An unknown revision is
 
 ---
 
+## 2a. Repository addressing
+
+Every endpoint takes a required `repo` query parameter: the repository's
+path **relative to the configured root**, e.g. `repo=widget` or
+`repo=team/widget`.
+
+An implementation **MUST** reject, with `400 invalid_request`, a `repo`
+that is absolute, contains `..`, empty, or `.` segments, or a backslash —
+and **MUST** verify that the *resolved* path (symlinks followed) still
+lies under the resolved root, so a symlink inside the root cannot become a
+door out of it. A `repo` that passes those checks but names no Mercurial
+repository is `404 not_found`.
+
+This parameter selects among pre-existing repositories; it **MUST NOT**
+create, initialize, or modify anything (the module is read-only, §0).
+
+---
+
 ## 3. Configuration
 
 ```toml
 [modules.hg]
 enabled = true
-repo = "/srv/checkouts/widget"   # required: the repository to serve
-hg_bin = "hg"                    # optional: the Mercurial executable
+root = "/srv/checkouts"   # required: repositories live under this directory
+hg_bin = "hg"             # optional: the Mercurial executable
 ```
 
 | Key | Type | Required | Notes |
 |---|---|---|---|
-| `repo` | string | yes | Path of the repository. Unreadable or not a repo **MUST** abort boot (SPEC.md §1.2), not serve errors. |
+| `root` | string | yes | Directory whose subdirectories are the servable repositories. A missing directory or an unrunnable `hg_bin` **MUST** abort boot (SPEC.md §1.2), not serve errors. Individual repositories are checked per request — they come and go while the sidecar runs. |
 | `hg_bin` | string | no, default `"hg"` | Executable to invoke. |
 
 An implementation that shells out **MUST** neutralise the host user's
@@ -115,10 +138,11 @@ copy or rename. Clean (`C`) and ignored (`I`) files are not reported in v1.
 
 ## 5. Endpoints
 
-All endpoints are `GET`. The working directory is addressed only where a
-row below says so; it is not a valid `{rev}`.
+All endpoints are `GET`, and all take the required `repo` parameter (§2a)
+in addition to what each table below lists. The working directory is
+addressed only where a row below says so; it is not a valid `{rev}`.
 
-### 5.1 `GET /hg/v1/repo` — summary
+### 5.1 `GET /hg/v1/repo?repo=widget` — summary
 
 ```json
 {
@@ -191,7 +215,7 @@ No additional error codes beyond SPEC.md §3.1. Mapping:
 
 | Condition | Response |
 |---|---|
-| Revision fails §2's charset; malformed/traversing path; ambiguous prefix | `400 invalid_request` |
-| Unknown revision; path not tracked at the revision | `404 not_found` |
+| Revision fails §2's charset; malformed/traversing path; ambiguous prefix; `repo` fails §2a's rules or escapes the root | `400 invalid_request` |
+| Unknown revision; path not tracked at the revision; `repo` naming no repository | `404 not_found` |
 | `hg` executable missing; invocation timed out | `503 upstream_unavailable` |
 | Any other `hg` failure | `502 upstream_error` |
