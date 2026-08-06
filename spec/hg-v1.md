@@ -23,8 +23,8 @@ and an implementation **MUST NOT** add one under this module name.
 ## 1. Scope
 
 In scope: repository summary, changeset log, one changeset with its file
-status list, changeset diffs, working-directory / revision-pair status, and
-file content at a revision.
+status list, changeset diffs, working-directory diffs, working-directory /
+revision-pair status, and file content at a revision.
 
 Deliberately out of scope for v1: manifests (full file listings at a
 revision), branch/bookmark/tag enumeration, annotate/blame, phases as a
@@ -106,13 +106,18 @@ reshape output nor run code on behalf of a request.
   "user": "Bob <b@example.com>",
   "date": "1970-01-01T01:00:20+01:00",
   "desc": "second",
-  "phase": "draft"
+  "phase": "draft",
+  "extras": {"branch": "default"}
 }
 ```
 
 `parents` has one entry normally, two for a merge, and never contains the
 null node. `date` is ISO 8601 in the author's own UTC offset. `phase` is one
-of `public`, `draft`, `secret`.
+of `public`, `draft`, `secret`. `extras` is the changeset's metadata
+dictionary — a standard Mercurial concept that extensions use to store
+additional information (e.g. evolve markers, review metadata). Clients
+interested in a specific extension's data read it from `extras`; clients that
+do not need it ignore the field.
 
 ### File status
 
@@ -187,7 +192,18 @@ Returns `text/x-diff`: a git-style unified diff (rename/copy aware), the
 whole changeset or one file with `?path=`. An empty diff is a `200` with an
 empty body, not an error.
 
-### 5.5 `GET /hg/v1/status` — what differs
+### 5.5 `GET /hg/v1/diff` — uncommitted changes as a diff
+
+| Param | Default | Notes |
+|---|---|---|
+| `path` | — | Narrow to one file (literal path, same rules as §2). |
+
+Returns `text/x-diff`: a git-style unified diff of the working directory
+against its parent — what `hg diff --git` produces. The counterpart of §5.4
+for work that has not been committed yet. An empty diff (clean working
+directory) is a `200` with an empty body, not an error.
+
+### 5.6 `GET /hg/v1/status` — what differs
 
 | Param | Default | Meaning |
 |---|---|---|
@@ -199,7 +215,7 @@ changed since X"; `?from=X&to=Y` compares two revisions; `?to=Y` answers
 "what did Y change". Response: `{ "files": [ … ] }` (§4). `!` and `?`
 entries appear only when `to` is the working directory.
 
-### 5.6 `GET /hg/v1/files/{rev}/{path}` — file content
+### 5.7 `GET /hg/v1/files/{rev}/{path}` — file content
 
 Raw bytes of `path` as of `{rev}`, `Content-Type` guessed from the file
 name, `application/octet-stream` when unguessable. `404 not_found`
