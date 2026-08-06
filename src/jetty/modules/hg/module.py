@@ -109,6 +109,9 @@ def _changeset(entry: Mapping[str, Any]) -> dict[str, Any]:
         "date": _iso(entry["date"]),
         "desc": entry["desc"],
         "phase": entry.get("phase", "public"),
+        # Extension-specific metadata: evolve markers, Fig's CL number, etc.
+        # A standard Mercurial concept; consumers pick the keys they need.
+        "extras": entry.get("extras", {}),
     }
 
 
@@ -294,6 +297,21 @@ class HgModule(Module):
         ) -> Response:
             target = self._resolve(repo)
             args = ["diff", "-c", _check_rev(rev), "--git"]
+            if path is not None:
+                args += ["--", "path:" + _check_path(path)]
+            return Response(
+                content=self._run(target, *args), media_type="text/x-diff"
+            )
+
+        @router.get("/diff")
+        def wdir_diff(repo: str, path: str | None = None) -> Response:
+            """Uncommitted changes as a unified diff: working directory vs
+            its parent. The counterpart of ``changeset_diff`` — same output
+            format, but for work that has not been committed yet.
+
+            Optional ``path`` narrows to one file (same rules as §2)."""
+            target = self._resolve(repo)
+            args = ["diff", "--git"]
             if path is not None:
                 args += ["--", "path:" + _check_path(path)]
             return Response(

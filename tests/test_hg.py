@@ -337,6 +337,60 @@ class HgModuleTest(absltest.TestCase):
             r = self.get(c, "/hg/v1/changesets", path="a/../../etc")
             self.assertEqual(r.status_code, 400)
 
+    # --- extras in changeset responses -----------------------------------
+
+    def test_changeset_extras_in_log(self):
+        """Changeset responses include the extras dict (spec §4)."""
+        with self.build() as c:
+            body = self.get(c, "/hg/v1/changesets").json()
+        # hg always sets at least the "branch" extra.
+        for cs in body["changesets"]:
+            self.assertIn("extras", cs, msg=f"missing extras on {cs['node'][:8]}")
+            self.assertIsInstance(cs["extras"], dict)
+
+    def test_changeset_extras_in_detail(self):
+        """GET /changesets/{rev} also carries extras."""
+        with self.build() as c:
+            body = self.get(c, "/hg/v1/changesets/tip").json()
+        self.assertIn("extras", body)
+        self.assertIsInstance(body["extras"], dict)
+
+    # --- /diff (working-directory diff, spec §5.5) -----------------------
+
+    def test_wdir_diff_modified_file(self):
+        """Uncommitted changes appear in the working-directory diff."""
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/diff")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/x-diff", r.headers["content-type"])
+        # c.txt is modified in the working directory (setUp writes v2).
+        self.assertIn("c.txt", r.text)
+
+    def test_wdir_diff_added_file(self):
+        """A tracked-but-uncommitted add shows up in the diff."""
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/diff")
+        # d.txt was added and tracked but not committed.
+        self.assertIn("d.txt", r.text)
+
+    def test_wdir_diff_narrowed_to_one_path(self):
+        """?path= restricts the diff to that file."""
+        with self.build() as c:
+            text = self.get(c, "/hg/v1/diff", path="c.txt").text
+        self.assertIn("c.txt", text)
+        self.assertNotIn("d.txt", text)
+
+    def test_wdir_diff_clean_is_empty(self):
+        """A clean working directory returns an empty diff, not an error."""
+        # Revert everything to make the working directory clean.
+        self._hg("revert", "-q", "--all", "--no-backup")
+        # Remove untracked files.
+        os.remove(os.path.join(self.repo, "untracked.txt"))
+        with self.build() as c:
+            r = self.get(c, "/hg/v1/diff")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.text, "")
+
     # --- lifecycle -------------------------------------------------------
 
     def test_disabled_module_answers_module_disabled(self):
