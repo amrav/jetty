@@ -109,9 +109,9 @@ def _changeset(entry: Mapping[str, Any]) -> dict[str, Any]:
         "date": _iso(entry["date"]),
         "desc": entry["desc"],
         "phase": entry.get("phase", "public"),
-        # Extension-specific metadata: evolve markers, Fig's CL number, etc.
-        # A standard Mercurial concept; consumers pick the keys they need.
         "extras": entry.get("extras", {}),
+        # Display name
+        "label": None,
     }
 
 
