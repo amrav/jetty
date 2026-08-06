@@ -29,6 +29,7 @@ details stay internal.
 | Rationale ([`DESIGN-NOTES.md`](DESIGN-NOTES.md)) — non-normative | Written |
 | Core: config, registry, listeners, `/healthz` `/v1/meta`, error envelope | **Implemented, tested** |
 | `reference` module (worked example + test fixture) | **Implemented, tested** |
+| `hg` module ([`spec/hg-v1.md`](spec/hg-v1.md)) — read-only Mercurial API | **Implemented, tested** |
 | `auth` module ([`spec/auth-v1.md`](spec/auth-v1.md)) | Specified, not implemented |
 | `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
 | `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
