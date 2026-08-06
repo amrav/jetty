@@ -355,6 +355,23 @@ class HgModuleTest(absltest.TestCase):
         self.assertIn("extras", body)
         self.assertIsInstance(body["extras"], dict)
 
+    # --- label in changeset responses ------------------------------------
+
+    def test_changeset_label_null_in_log(self):
+        """The label field is present and null (spec §4)."""
+        with self.build() as c:
+            body = self.get(c, "/hg/v1/changesets").json()
+        for cs in body["changesets"]:
+            self.assertIn("label", cs, msg=f"missing label on {cs['node'][:8]}")
+            self.assertIsNone(cs["label"])
+
+    def test_changeset_label_null_in_detail(self):
+        """GET /changesets/{rev} also carries a null label."""
+        with self.build() as c:
+            body = self.get(c, "/hg/v1/changesets/tip").json()
+        self.assertIn("label", body)
+        self.assertIsNone(body["label"])
+
     # --- /diff (working-directory diff, spec §5.5) -----------------------
 
     def test_wdir_diff_modified_file(self):

@@ -107,7 +107,8 @@ reshape output nor run code on behalf of a request.
   "date": "1970-01-01T01:00:20+01:00",
   "desc": "second",
   "phase": "draft",
-  "extras": {"branch": "default"}
+  "extras": {"branch": "default"},
+  "label": null
 }
 ```
 
@@ -117,7 +118,11 @@ of `public`, `draft`, `secret`. `extras` is the changeset's metadata
 dictionary — a standard Mercurial concept that extensions use to store
 additional information (e.g. evolve markers, review metadata). Clients
 interested in a specific extension's data read it from `extras`; clients that
-do not need it ignore the field.
+do not need it ignore the field. `label` is the commit's display name in
+whatever review system the repository is attached to, already formatted for
+display. Clients print it verbatim and fall back to the short node when
+`null`. `null` means the repository has no such system, or this commit has
+no reference in it.
 
 ### File status
 

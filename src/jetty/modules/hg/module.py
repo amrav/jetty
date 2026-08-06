@@ -109,9 +109,15 @@ def _changeset(entry: Mapping[str, Any]) -> dict[str, Any]:
         "date": _iso(entry["date"]),
         "desc": entry["desc"],
         "phase": entry.get("phase", "public"),
-        # Extension-specific metadata: evolve markers, Fig's CL number, etc.
+        # Extension-specific metadata: evolve markers, etc.
         # A standard Mercurial concept; consumers pick the keys they need.
         "extras": entry.get("extras", {}),
+        # Display name from whatever review system the repository is
+        # attached to, already formatted for display. Clients print it
+        # verbatim and fall back to the short node when null. The
+        # open-source implementation has no review system; a
+        # deployment-specific implementation may populate this.
+        "label": None,
     }
 
 
