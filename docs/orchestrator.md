@@ -339,7 +339,11 @@ Root: `--root` flag > `$JETTY_ORC_ROOT` > `$XDG_STATE_HOME/jetty-orc`
 
 A record names its supervisor by pid **and** kernel start-ticks, so a
 recycled pid can't impersonate a live instance; zombies count as dead.
-`up` refuses a name whose record is still live. `ls` reads records plus live
+`up` refuses an exact name whose record is still live (with the default
+random suffix that only happens under `--name`). `status`/`logs`/`kill`
+accept the base name when it matches exactly one instance (`logs sf-dev`
+finds `sf-dev-a3f1`); an ambiguous prefix is refused with the candidates
+listed. `ls` reads records plus live
 cgroup//proc stats (CPU% is sampled over ~300 ms); `kill --force` performs a
 kernel-level kill from outside (`cgroup.kill` on the instance root, or a
 session sweep under pgroup) for wedged instances.
