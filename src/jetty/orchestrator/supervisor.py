@@ -31,7 +31,7 @@ from .render import (
     render_gate_argv,
     render_service,
     render_str,
-    resolve_command,
+    render_argv,
     resolve_config_path,
 )
 from .resolvers import Resolvers
@@ -126,11 +126,7 @@ class Supervisor:
         self._resolvers = Resolvers(
             cfg.resolvers,
             {
-                n: resolve_command(
-                    [render_str(a, ctx) for a in r.cmd],
-                    self._config_dir,
-                    f"resolvers.{n} cmd",
-                )
+                n: render_argv(r.cmd, ctx, self._config_dir, f"resolvers.{n} cmd")
                 for n, r in cfg.resolvers.items()
             },
             cwd=workdir,

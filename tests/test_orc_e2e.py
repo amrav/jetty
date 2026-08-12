@@ -714,6 +714,49 @@ cmd = ["{{bin.app}}"]
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_env_default_placeholders_forward_optional_flags(self):
+        self.workdir.create_file(
+            "argv.py",
+            content=(
+                "import sys, time\n"
+                "open('argv.txt', 'w').write('\\n'.join(sys.argv[1:]))\n"
+                "time.sleep(300)\n"
+            ),
+        )
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.app]
+cmd = ["{sys.executable}", "argv.py", "--level", "{{env.ORC_E2E_LVL:-info}}", "{{env.ORC_E2E_FLAGS:-}}"]
+"""
+        )
+        # Without the variables: the default fills in, the empty one vanishes.
+        self.env.pop("ORC_E2E_LVL", None)
+        self.env.pop("ORC_E2E_FLAGS", None)
+        proc = self.orc("up", "-c", config)
+        self.wait_until(lambda: os.path.exists("argv.txt"), proc, what="defaults run")
+        with open("argv.txt") as f:
+            self.assertEqual(f.read().splitlines(), ["--level", "info"])
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+        os.unlink("argv.txt")
+
+        # With them: the override lands, and the standalone element splices.
+        self.env["ORC_E2E_LVL"] = "debug"
+        self.env["ORC_E2E_FLAGS"] = '--reload "two words"'
+        proc = self.orc("up", "-c", config)
+        self.wait_until(lambda: os.path.exists("argv.txt"), proc, what="override run")
+        with open("argv.txt") as f:
+            self.assertEqual(
+                f.read().splitlines(),
+                ["--level", "debug", "--reload", "two words"],
+            )
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_up_echoes_prefixed_output_and_logs_command_replays_it(self):
         config = self.write_config(
             f"""

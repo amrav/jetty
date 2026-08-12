@@ -9,6 +9,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from unittest import mock
 
 from absl.testing import absltest
 
@@ -135,6 +136,71 @@ class RenderTest(absltest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "ports.nope"):
             validate_templates(cfg, self.create_tempdir().full_path)
+
+
+class EnvSubstitutionTest(absltest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.ctx = build_context("dev", {"api": 1234}, "/s", "/l")
+        self.base = self.create_tempdir().full_path
+
+    def test_set_variable_substitutes(self):
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": "debug"}):
+            self.assertEqual(
+                render_str("--log-level={env.ORC_TEST_LVL}", self.ctx),
+                "--log-level=debug",
+            )
+
+    def test_unset_without_default_is_a_clear_error(self):
+        with mock.patch.dict(os.environ, clear=True):
+            with self.assertRaisesRegex(RenderError, "ORC_TEST_LVL is not set"):
+                render_str("{env.ORC_TEST_LVL}", self.ctx)
+
+    def test_default_applies_when_unset_or_empty(self):
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "info")
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": ""}):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "info")
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": "warn"}):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "warn")
+
+    def test_standalone_env_element_splices_argv(self):
+        from jetty.orchestrator.render import render_argv
+
+        with mock.patch.dict(os.environ, {"ORC_TEST_FLAGS": '--a "b c"'}):
+            self.assertEqual(
+                render_argv(["./run", "{env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run"), "--a", "b c"],
+            )
+        # Unset with an empty default: the element vanishes instead of
+        # becoming an empty argument.
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(
+                render_argv(["./run", "{env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run")],
+            )
+        # Embedded in a larger element: plain substitution, one argument.
+        with mock.patch.dict(os.environ, {"ORC_TEST_FLAGS": "a b"}):
+            self.assertEqual(
+                render_argv(["./run", "--x={env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run"), "--x=a b"],
+            )
+
+    def test_env_reaches_every_rendered_field(self):
+        cfg = config_from(
+            MINIMAL
+            + 'env = { LEVEL = "{env.ORC_TEST_LVL:-info}" }\n'
+            + '[gates.g]\ncheck = ["test", "-f", "{env.ORC_TEST_FLAG_FILE:-flag}"]\n'
+        )
+        with mock.patch.dict(os.environ, clear=True):
+            validate_templates(cfg, self.base)  # defaults keep it valid
+
+    def test_string_cmd_form_is_shell_split_not_a_shell(self):
+        cfg = config_from(MINIMAL.replace('["true"]', '"./run --flag \'two words\' && echo hi"'))
+        self.assertEqual(
+            cfg.services["api"].cmd,
+            ["./run", "--flag", "two words", "&&", "echo", "hi"],
+        )
 
 
 class ConfigPathTest(absltest.TestCase):

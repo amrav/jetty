@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import shlex
 import string
 import tomllib
 from pathlib import Path
@@ -101,6 +102,20 @@ class _Table:
             )
         return value
 
+
+    def take_argv(self, key: str, min_len: int = 0) -> list[str]:
+        """An argv: a list of strings, or a single string split shell-style
+        (`cmd = "./run --flag"`). The string form is a convenience, not a
+        shell — `&&`, pipes and redirects stay literal argv words; wrap in
+        `["bash", "-c", "..."]` for shell semantics."""
+        value = self._raw.get(key)
+        if isinstance(value, str):
+            try:
+                self._raw[key] = shlex.split(value)
+            except ValueError as e:
+                raise ConfigError(f"{self.at(key)}: {e}") from None
+        return self.take_str_list(key, min_len)
+
     def take_int_list(self, key: str, default: list[int]) -> list[int]:
         value = self._raw.pop(key, list(default))
         if not isinstance(value, list) or any(
@@ -155,7 +170,7 @@ class GateConfig:
     def parse(cls, raw: object, where: str) -> "GateConfig":
         t = _Table(raw, where)
         cfg = cls(
-            check=t.take_str_list("check", min_len=1),
+            check=t.take_argv("check", min_len=1),
             recheck_seconds=t.take_number("recheck_seconds", 15.0, gt=0),
             timeout_seconds=t.take_number("timeout_seconds", 20.0, gt=0),
         )
@@ -185,7 +200,7 @@ class ResolverConfig:
     def parse(cls, raw: object, where: str) -> "ResolverConfig":
         t = _Table(raw, where)
         cfg = cls(
-            cmd=t.take_str_list("cmd", min_len=1),
+            cmd=t.take_argv("cmd", min_len=1),
             provides=t.take_str_list("provides"),
             timeout_seconds=t.take_number("timeout_seconds", 30.0, gt=0),
             refresh=t.take_choice("refresh", ("spawn", "instance"), "spawn"),
@@ -294,7 +309,7 @@ class ServiceConfig:
     def parse(cls, raw: object, where: str) -> "ServiceConfig":
         t = _Table(raw, where)
         cfg = cls(
-            cmd=t.take_str_list("cmd", min_len=1),
+            cmd=t.take_argv("cmd", min_len=1),
             cwd=t.take_str("cwd"),
             env=t.take_str_dict("env"),
             after=t.take_str_list("after"),

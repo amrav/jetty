@@ -6,11 +6,16 @@
 #   jetty-orc ls / status <name> / kill <name>      # from another terminal
 #
 # Placeholders available everywhere (cmd, env, cwd, probes, gate argv):
-#   {ports.<name>}    a port allocated (or verified) at launch
-#   {instance.name}   this instance's name
-#   {home}            the current user's home directory
-#   {state_dir}       per-instance state directory (put databases here)
-#   {logs_dir}        this run's log directory (~/.jetty/logs/<name>-<timestamp>)
+#   {ports.<name>}         a port allocated (or verified) at launch
+#   {instance.name}        this instance's name
+#   {home}                 the current user's home directory
+#   {state_dir}            per-instance state directory (put databases here)
+#   {logs_dir}             this run's log directory (~/.jetty/logs/<name>-<timestamp>)
+#   {env.NAME}             environment variable, required (error if unset)
+#   {env.NAME:-default}    environment variable with a default — the way to
+#                          make any value operator-overridable; a cmd element
+#                          that is only an env placeholder shell-splits, so
+#                          "{env.FLAGS:-}" = optional extra flags
 
 [instance]
 name = "dev"

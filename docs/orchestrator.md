@@ -110,9 +110,39 @@ grace_seconds = 10.0        # then SIGKILL to the whole group
 
 ### Placeholders
 
-`{ports.<name>}`, `{instance.name}`, `{state_dir}`, `{logs_dir}` render into
-`cmd`, `env` values, `cwd`, readiness probes and gate argvs after ports are
-allocated. `{{` / `}}` escape literal braces (`str.format` parsing rules).
+`{ports.<name>}`, `{instance.name}`, `{home}`, `{state_dir}`, `{logs_dir}`
+render into `cmd`, `env` values, `cwd`, readiness probes and gate/resolver
+argvs after ports are allocated. `{{` / `}}` escape literal braces
+(`str.format` parsing rules).
+
+**Environment substitution** is how a config stays overridable without
+editing it: `{env.NAME}` substitutes an environment variable (a clear error
+at `check`/`up` if unset — that's how you mark a variable required), and
+`{env.NAME:-default}` falls back to the default when the variable is unset
+or empty (the docker-compose `:-` convention). In argv positions (`cmd`,
+gate `check`, resolver `cmd`) an element that is *nothing but* an env
+placeholder shell-splits after substitution:
+
+```toml
+[services.api]
+cmd = ["python", "-m", "uvicorn", "app:app",
+       "--log-level", "{env.API_LOG_LEVEL:-info}",   # scalar with default
+       "{env.API_FLAGS:-}"]                          # optional flags: zero
+                                                     # args unset, several set
+```
+
+```sh
+API_LOG_LEVEL=debug API_FLAGS="--reload --workers 2" jetty-orc up -c orc.toml
+```
+
+An env placeholder embedded in a larger element (`"--x={env.Y:-}"`)
+substitutes as plain text and stays one argument. Env vars are read at
+render time, i.e. per spawn.
+
+Argv fields (`cmd`, gate `check`, resolver `cmd`) also accept a single
+string instead of a list — `cmd = "./run --flag"` is shell-*split*, not a
+shell: `&&` and pipes stay literal words; use `["bash", "-c", "..."]` for
+shell semantics.
 
 ### Paths
 
