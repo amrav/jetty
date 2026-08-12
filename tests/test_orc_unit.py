@@ -9,6 +9,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from unittest import mock
 
 from absl.testing import absltest
 
@@ -110,6 +111,96 @@ cmd = ["true"]
         self.assertEqual(start_order(cfg.services), ["db", "api", "web"])
 
 
+class InheritanceTest(absltest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.dir = self.create_tempdir()
+        self.dir.create_file(
+            "prod.toml",
+            content="""
+[instance]
+name = "prod"
+
+[ports]
+api = 8000
+
+[services.api]
+cmd = ["./serve", "--port", "{ports.api}"]
+[services.api.restart]
+max_restarts = 3
+
+[services.metrics]
+cmd = ["./metrics"]
+""",
+        )
+
+    def load(self, name: str) -> OrchestratorConfig:
+        return OrchestratorConfig.load(os.path.join(self.dir.full_path, name))
+
+    def test_child_overrides_and_inherits(self):
+        self.dir.create_file(
+            "dev.toml",
+            content="""
+extends = "prod.toml"
+
+[instance]
+name = "dev"
+
+[ports]
+api = "8000+"
+
+[services.api.restart]
+max_restarts = 10
+""",
+        )
+        cfg = self.load("dev.toml")
+        self.assertEqual(cfg.instance.name, "dev")
+        self.assertEqual(cfg.ports["api"], "8000+")
+        # Deep merge: the override touched restart.max_restarts only; the
+        # inherited cmd and the sibling service survive.
+        self.assertEqual(cfg.services["api"].restart.max_restarts, 10)
+        self.assertEqual(cfg.services["api"].cmd, ["./serve", "--port", "{ports.api}"])
+        self.assertEqual(cfg.services["api"].restart.window_seconds, 60.0)
+        self.assertIn("metrics", cfg.services)
+
+    def test_false_deletes_an_inherited_table(self):
+        self.dir.create_file(
+            "dev.toml",
+            content='extends = "prod.toml"\n[services]\nmetrics = false\n',
+        )
+        cfg = self.load("dev.toml")
+        self.assertNotIn("metrics", cfg.services)
+        self.assertIn("api", cfg.services)
+
+    def test_chain_inherits_transitively(self):
+        self.dir.create_file(
+            "staging.toml",
+            content='extends = "prod.toml"\n[instance]\nname = "staging"\n',
+        )
+        self.dir.create_file(
+            "dev.toml",
+            content='extends = "staging.toml"\n[ports]\napi = "auto"\n',
+        )
+        cfg = self.load("dev.toml")
+        self.assertEqual(cfg.instance.name, "staging")  # nearest ancestor wins
+        self.assertEqual(cfg.ports["api"], "auto")
+        self.assertIn("metrics", cfg.services)
+
+    def test_cycle_and_missing_parent_are_clear_errors(self):
+        self.dir.create_file("a.toml", content='extends = "b.toml"\n')
+        self.dir.create_file("b.toml", content='extends = "a.toml"\n')
+        with self.assertRaisesRegex(Exception, "cycle"):
+            self.load("a.toml")
+        self.dir.create_file("c.toml", content='extends = "nope.toml"\n')
+        with self.assertRaisesRegex(Exception, "not found"):
+            self.load("c.toml")
+
+    def test_extends_cannot_escape_the_subtree_relatively(self):
+        self.dir.create_file("dev.toml", content='extends = "../outside.toml"\n')
+        with self.assertRaisesRegex(Exception, "outside"):
+            self.load("dev.toml")
+
+
 class RenderTest(absltest.TestCase):
     def setUp(self):
         super().setUp()
@@ -135,6 +226,91 @@ class RenderTest(absltest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "ports.nope"):
             validate_templates(cfg, self.create_tempdir().full_path)
+
+
+class EnvSubstitutionTest(absltest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.ctx = build_context("dev", {"api": 1234}, "/s", "/l")
+        self.base = self.create_tempdir().full_path
+
+    def test_set_variable_substitutes(self):
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": "debug"}):
+            self.assertEqual(
+                render_str("--log-level={env.ORC_TEST_LVL}", self.ctx),
+                "--log-level=debug",
+            )
+
+    def test_unset_without_default_is_a_clear_error(self):
+        with mock.patch.dict(os.environ, clear=True):
+            with self.assertRaisesRegex(RenderError, "ORC_TEST_LVL is not set"):
+                render_str("{env.ORC_TEST_LVL}", self.ctx)
+
+    def test_default_applies_when_unset_or_empty(self):
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "info")
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": ""}):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "info")
+        with mock.patch.dict(os.environ, {"ORC_TEST_LVL": "warn"}):
+            self.assertEqual(render_str("{env.ORC_TEST_LVL:-info}", self.ctx), "warn")
+
+    def test_standalone_env_element_splices_argv(self):
+        from jetty.orchestrator.render import render_argv
+
+        with mock.patch.dict(os.environ, {"ORC_TEST_FLAGS": '--a "b c"'}):
+            self.assertEqual(
+                render_argv(["./run", "{env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run"), "--a", "b c"],
+            )
+        # Unset with an empty default: the element vanishes instead of
+        # becoming an empty argument.
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(
+                render_argv(["./run", "{env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run")],
+            )
+        # Embedded in a larger element: plain substitution, one argument.
+        with mock.patch.dict(os.environ, {"ORC_TEST_FLAGS": "a b"}):
+            self.assertEqual(
+                render_argv(["./run", "--x={env.ORC_TEST_FLAGS:-}"], self.ctx, self.base, "cmd"),
+                [os.path.join(self.base, "run"), "--x=a b"],
+            )
+
+    def test_env_reaches_every_rendered_field(self):
+        cfg = config_from(
+            MINIMAL
+            + 'env = { LEVEL = "{env.ORC_TEST_LVL:-info}" }\n'
+            + '[gates.g]\ncheck = ["test", "-f", "{env.ORC_TEST_FLAG_FILE:-flag}"]\n'
+        )
+        with mock.patch.dict(os.environ, clear=True):
+            validate_templates(cfg, self.base)  # defaults keep it valid
+
+    def test_cwd_from_env_with_tilde_default(self):
+        from jetty.orchestrator.render import render_service
+
+        svc = config_from(
+            MINIMAL + 'cwd = "{env.ORC_TEST_PROJECT_DIR:-~/projects}"\n'
+        ).services["api"]
+        with mock.patch.dict(os.environ, {"ORC_TEST_PROJECT_DIR": "/opt/proj"}):
+            self.assertEqual(render_service(svc, self.ctx, self.base).cwd, "/opt/proj")
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(
+                render_service(svc, self.ctx, self.base).cwd,
+                os.path.expanduser("~/projects"),
+            )
+        # A tilde inside the variable's value expands too.
+        with mock.patch.dict(os.environ, {"ORC_TEST_PROJECT_DIR": "~/work"}):
+            self.assertEqual(
+                render_service(svc, self.ctx, self.base).cwd,
+                os.path.expanduser("~/work"),
+            )
+
+    def test_string_cmd_form_is_shell_split_not_a_shell(self):
+        cfg = config_from(MINIMAL.replace('["true"]', '"./run --flag \'two words\' && echo hi"'))
+        self.assertEqual(
+            cfg.services["api"].cmd,
+            ["./run", "--flag", "two words", "&&", "echo", "hi"],
+        )
 
 
 class ConfigPathTest(absltest.TestCase):

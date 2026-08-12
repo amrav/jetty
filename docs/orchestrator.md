@@ -108,11 +108,80 @@ signal = "TERM"             # TERM | INT | HUP, sent to the whole group
 grace_seconds = 10.0        # then SIGKILL to the whole group
 ```
 
+### Inheritance
+
+A config can extend one other config (single inheritance; chains like
+dev → staging → prod are fine, cycles are errors):
+
+```toml
+# dev.toml
+extends = "prod.toml"        # usual path rules: relative = this file's
+                             # subtree, ~/absolute = anywhere
+
+[instance]
+name = "sf-dev"
+
+[ports]
+api = "8000+"                # replaces prod's fixed port
+
+[services.api.env]
+STARFLEET_DEMO = "1"         # tables deep-merge: only this key changes
+
+[services]
+metrics = false              # `false` deletes an inherited service
+```
+
+Merge rules: tables merge recursively with the child winning; scalars,
+arrays and argv strings replace wholesale (a child wanting a different
+`cmd` states the whole cmd — positional list-splicing is a guessing game);
+overriding an inherited table with `false` deletes it. `extends` resolves
+before validation, so `check` and every load-time error apply to the merged
+result. One anchoring note: relative paths *inside* the merged config
+(cwd, scripts) resolve against the **entry** config's directory — keep
+parent and child side by side (the normal layout), or use
+absolute/`~`/`{env.*}` paths in the parent.
+
 ### Placeholders
 
-`{ports.<name>}`, `{instance.name}`, `{state_dir}`, `{logs_dir}` render into
-`cmd`, `env` values, `cwd`, readiness probes and gate argvs after ports are
-allocated. `{{` / `}}` escape literal braces (`str.format` parsing rules).
+`{ports.<name>}`, `{instance.name}`, `{home}`, `{state_dir}`, `{logs_dir}`
+render into `cmd`, `env` values, `cwd`, readiness probes and gate/resolver
+argvs after ports are allocated. `{{` / `}}` escape literal braces
+(`str.format` parsing rules).
+
+**Environment substitution** is how a config stays overridable without
+editing it: `{env.NAME}` substitutes an environment variable (a clear error
+at `check`/`up` if unset — that's how you mark a variable required), and
+`{env.NAME:-default}` falls back to the default when the variable is unset
+or empty (the docker-compose `:-` convention). In argv positions (`cmd`,
+gate `check`, resolver `cmd`) an element that is *nothing but* an env
+placeholder shell-splits after substitution:
+
+```toml
+[services.api]
+cmd = ["python", "-m", "uvicorn", "app:app",
+       "--log-level", "{env.API_LOG_LEVEL:-info}",   # scalar with default
+       "{env.API_FLAGS:-}"]                          # optional flags: zero
+                                                     # args unset, several set
+```
+
+```sh
+API_LOG_LEVEL=debug API_FLAGS="--reload --workers 2" jetty-orc up -c orc.toml
+```
+
+An env placeholder embedded in a larger element (`"--x={env.Y:-}"`)
+substitutes as plain text and stays one argument. Env vars are read at
+render time, i.e. per spawn.
+
+Paths compose with this: substitution happens before path resolution, so
+`cwd = "{env.MY_PROJECT_DIR:-~/projects}"` uses the variable when set and
+falls back to `~/projects` — and a `~` inside the variable's value expands
+too. The usual rules then apply (absolute/`~` anywhere, relative confined
+to the config's subtree).
+
+Argv fields (`cmd`, gate `check`, resolver `cmd`) also accept a single
+string instead of a list — `cmd = "./run --flag"` is shell-*split*, not a
+shell: `&&` and pipes stay literal words; use `["bash", "-c", "..."]` for
+shell semantics.
 
 ### Paths
 
@@ -190,7 +259,10 @@ invocation's, so separate runs of the same instance never interleave
 deleted — prune them yourself). Append-only, stdout+stderr merged, with
 orchestrator annotations (spawn headers, restart/gate notes) inline;
 restarts within a run append under a fresh spawn header. The last ~8 KiB
-travels with failure reports.
+travels with failure reports. Resolver invocations get the same treatment —
+`resolver-<name>.log` beside the service logs (header, the script's stderr,
+and the resolved result or failure), included in `logs` and the `up`
+console; cache hits run nothing and log nothing.
 
 ## Dynamic binaries (resolvers)
 

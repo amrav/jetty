@@ -15,7 +15,9 @@ it would cost exactly the deployment story this tool exists to provide.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
+import shlex
 import string
 import tomllib
 from pathlib import Path
@@ -101,6 +103,20 @@ class _Table:
             )
         return value
 
+
+    def take_argv(self, key: str, min_len: int = 0) -> list[str]:
+        """An argv: a list of strings, or a single string split shell-style
+        (`cmd = "./run --flag"`). The string form is a convenience, not a
+        shell — `&&`, pipes and redirects stay literal argv words; wrap in
+        `["bash", "-c", "..."]` for shell semantics."""
+        value = self._raw.get(key)
+        if isinstance(value, str):
+            try:
+                self._raw[key] = shlex.split(value)
+            except ValueError as e:
+                raise ConfigError(f"{self.at(key)}: {e}") from None
+        return self.take_str_list(key, min_len)
+
     def take_int_list(self, key: str, default: list[int]) -> list[int]:
         value = self._raw.pop(key, list(default))
         if not isinstance(value, list) or any(
@@ -155,7 +171,7 @@ class GateConfig:
     def parse(cls, raw: object, where: str) -> "GateConfig":
         t = _Table(raw, where)
         cfg = cls(
-            check=t.take_str_list("check", min_len=1),
+            check=t.take_argv("check", min_len=1),
             recheck_seconds=t.take_number("recheck_seconds", 15.0, gt=0),
             timeout_seconds=t.take_number("timeout_seconds", 20.0, gt=0),
         )
@@ -185,7 +201,7 @@ class ResolverConfig:
     def parse(cls, raw: object, where: str) -> "ResolverConfig":
         t = _Table(raw, where)
         cfg = cls(
-            cmd=t.take_str_list("cmd", min_len=1),
+            cmd=t.take_argv("cmd", min_len=1),
             provides=t.take_str_list("provides"),
             timeout_seconds=t.take_number("timeout_seconds", 30.0, gt=0),
             refresh=t.take_choice("refresh", ("spawn", "instance"), "spawn"),
@@ -294,7 +310,7 @@ class ServiceConfig:
     def parse(cls, raw: object, where: str) -> "ServiceConfig":
         t = _Table(raw, where)
         cfg = cls(
-            cmd=t.take_str_list("cmd", min_len=1),
+            cmd=t.take_argv("cmd", min_len=1),
             cwd=t.take_str("cwd"),
             env=t.take_str_dict("env"),
             after=t.take_str_list("after"),
@@ -455,9 +471,76 @@ class OrchestratorConfig:
 
     @staticmethod
     def load(path: str | Path) -> "OrchestratorConfig":
-        return OrchestratorConfig.parse(
-            tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        return OrchestratorConfig.parse(load_raw(Path(path)))
+
+
+def load_raw(path: Path, _seen: frozenset[str] = frozenset()) -> dict:
+    """Read a config file, following its `extends` chain.
+
+    Single inheritance: a config names at most one parent (`extends =
+    "prod.toml"`), though chains are fine (dev → staging → prod). The parent
+    path follows the usual rules — relative anchors to THIS file's directory
+    and must stay inside its subtree; `~` and absolute paths go anywhere.
+
+    Merge: tables merge recursively and the child wins; scalars and arrays
+    replace wholesale (splicing lists by position is a guessing game — a
+    child that wants a different `cmd` states the whole cmd). Overriding an
+    inherited table with `false` deletes it, so a dev config can drop a
+    prod-only service:
+
+        extends = "prod.toml"
+        [services]
+        metrics = false
+    """
+    real = os.path.realpath(path)
+    if real in _seen:
+        raise ConfigError(f"extends cycle involving {path}")
+    try:
+        raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ConfigError(f"config file not found: {path}") from None
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: {e}") from None
+    extends = raw.pop("extends", None)
+    if extends is None:
+        return raw
+    if not isinstance(extends, str):
+        raise ConfigError(f"{path}: extends must be a path string")
+    parent = _resolve_extends(extends, str(Path(real).parent))
+    return merge_raw(load_raw(Path(parent), _seen | {real}), raw)
+
+
+def _resolve_extends(value: str, config_dir: str) -> str:
+    """The path rules every config path follows, restated here because
+    render.py (which owns them for commands and cwds) imports this module."""
+    if value.startswith("~"):
+        expanded = os.path.expanduser(value)
+        if os.path.isabs(expanded):
+            value = expanded
+    if os.path.isabs(value):
+        return value
+    base = os.path.realpath(config_dir)
+    resolved = os.path.realpath(os.path.join(base, value))
+    if resolved != base and not resolved.startswith(base + os.sep):
+        raise ConfigError(
+            f"extends: relative path {value!r} resolves to {resolved}, outside "
+            f"this config's directory ({base}); relative paths may only reach "
+            "the config's own subtree — use an absolute path if this is "
+            "intentional"
         )
+    return resolved
+
+
+def merge_raw(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for key, value in override.items():
+        if value is False and isinstance(out.get(key), dict):
+            out.pop(key, None)  # the delete sentinel for inherited tables
+        elif isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge_raw(out[key], value)
+        else:
+            out[key] = value
+    return out
 
 
 def bin_refs(strings: list[str]) -> set[str]:

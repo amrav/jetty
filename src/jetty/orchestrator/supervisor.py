@@ -31,7 +31,7 @@ from .render import (
     render_gate_argv,
     render_service,
     render_str,
-    resolve_command,
+    render_argv,
     resolve_config_path,
 )
 from .resolvers import Resolvers
@@ -116,6 +116,27 @@ class Supervisor:
                 self._config_dir,
                 "instance.workdir",
             )
+        # The foreground view: every service's — and resolver's — output on
+        # OUR stdout, each line under its coloured [name] prefix (the log
+        # files stay the durable copy). Line-buffered per name so output
+        # never interleaves mid-line.
+        echo_for = None
+        if not self._quiet:
+            console_names = list(cfg.services) + [
+                f"resolver-{n}" for n in cfg.resolvers
+            ]
+            prefixer = console.Prefixer(
+                console_names, console.want_color(sys.stdout)
+            )
+            buffers = {n: console.LineBuffer() for n in console_names}
+
+            def echo_for(cname: str):  # noqa: F811
+                def echo(chunk: bytes) -> None:
+                    for line in buffers[cname].feed(chunk):
+                        print(prefixer.format(cname, line), flush=True)
+
+                return echo
+
         gates = GateSet(
             {
                 n: (g, render_gate_argv(g, ctx, self._config_dir))
@@ -126,14 +147,16 @@ class Supervisor:
         self._resolvers = Resolvers(
             cfg.resolvers,
             {
-                n: resolve_command(
-                    [render_str(a, ctx) for a in r.cmd],
-                    self._config_dir,
-                    f"resolvers.{n} cmd",
-                )
+                n: render_argv(r.cmd, ctx, self._config_dir, f"resolvers.{n} cmd")
                 for n, r in cfg.resolvers.items()
             },
             cwd=workdir,
+            logs_dir=logs_dir,
+            echo=(
+                (lambda rname, chunk: echo_for(f"resolver-{rname}")(chunk))
+                if echo_for is not None
+                else None
+            ),
         )
         self._containment.setup(list(cfg.services))
 
@@ -148,24 +171,6 @@ class Supervisor:
             self._write_record()
 
         extra_env = service_extra_env(name, self._containment)
-
-        # The foreground view: every service's output on OUR stdout, each
-        # line under its coloured [service] prefix (the log files stay the
-        # durable copy). Line-buffered per service so output never
-        # interleaves mid-line.
-        echo_for = None
-        if not self._quiet:
-            prefixer = console.Prefixer(
-                list(cfg.services), console.want_color(sys.stdout)
-            )
-            buffers = {n: console.LineBuffer() for n in cfg.services}
-
-            def echo_for(sname: str):  # noqa: F811
-                def echo(chunk: bytes) -> None:
-                    for line in buffers[sname].feed(chunk):
-                        print(prefixer.format(sname, line), flush=True)
-
-                return echo
 
         def renderer(sname: str, svc_cfg, bins: set[str]):
             async def render() -> RenderedService:

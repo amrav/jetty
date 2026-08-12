@@ -420,7 +420,7 @@ name = "dev"
 containment = "pgroup"
 
 [resolvers.app]
-cmd = ["cat", "target.txt"]
+cmd = ["sh", "-c", "echo picking a release >&2; cat target.txt"]
 cache_seconds = 0.0
 
 [services.app]
@@ -438,6 +438,19 @@ backoff_initial_seconds = 0.05
             record["resolvers"]["app"]["binaries"]["app"],
             f"{self.workdir.full_path}/app-v1",
         )
+        # Resolver invocations are logged like services: header, the
+        # script's stderr, and the outcome — in the run's log dir, through
+        # `logs`, and on the up console.
+        resolver_log = os.path.join(record["logs_dir"], "resolver-app.log")
+        with open(resolver_log) as f:
+            log = f.read()
+        self.assertIn("=== jetty-orc resolve", log)
+        self.assertIn("picking a release", log)
+        self.assertIn(f"resolved app={self.workdir.full_path}/app-v1", log)
+        rc, output = self.orc_run("logs", "dev")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("[resolver-app]", output)
+        self.assertIn("picking a release", output)
         with open("target.txt", "w") as f:  # the release moves
             f.write(f"{self.workdir.full_path}/app-v2\n")
         v1_pid = record["services"]["app"]["pid"]
@@ -674,6 +687,10 @@ backoff_initial_seconds = 0.05
         self.assertEqual(rc, 1, output)
         self.assertIn("resolver 'app' exited 3", output)
         self.assertIn("release feed is down", output)
+        # The failure is in the resolver's own log too, for post-mortems.
+        record = self.record()
+        with open(os.path.join(record["logs_dir"], "resolver-app.log")) as f:
+            self.assertIn("release feed is down", f.read())
 
     def test_everything_defaults_to_the_config_files_directory(self):
         """Config in a subdir, supervisor launched from outside it: the
@@ -711,6 +728,49 @@ cmd = ["{{bin.app}}"]
         marker = os.path.join(confdir.full_path, "marker.txt")
         self.wait_until(lambda: os.path.exists(marker), proc, what="marker in confdir")
         self.assertFalse(os.path.exists("marker.txt"), "must not use the launch cwd")
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
+    def test_env_default_placeholders_forward_optional_flags(self):
+        self.workdir.create_file(
+            "argv.py",
+            content=(
+                "import sys, time\n"
+                "open('argv.txt', 'w').write('\\n'.join(sys.argv[1:]))\n"
+                "time.sleep(300)\n"
+            ),
+        )
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.app]
+cmd = ["{sys.executable}", "argv.py", "--level", "{{env.ORC_E2E_LVL:-info}}", "{{env.ORC_E2E_FLAGS:-}}"]
+"""
+        )
+        # Without the variables: the default fills in, the empty one vanishes.
+        self.env.pop("ORC_E2E_LVL", None)
+        self.env.pop("ORC_E2E_FLAGS", None)
+        proc = self.orc("up", "-c", config)
+        self.wait_until(lambda: os.path.exists("argv.txt"), proc, what="defaults run")
+        with open("argv.txt") as f:
+            self.assertEqual(f.read().splitlines(), ["--level", "info"])
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+        os.unlink("argv.txt")
+
+        # With them: the override lands, and the standalone element splices.
+        self.env["ORC_E2E_LVL"] = "debug"
+        self.env["ORC_E2E_FLAGS"] = '--reload "two words"'
+        proc = self.orc("up", "-c", config)
+        self.wait_until(lambda: os.path.exists("argv.txt"), proc, what="override run")
+        with open("argv.txt") as f:
+            self.assertEqual(
+                f.read().splitlines(),
+                ["--level", "debug", "--reload", "two words"],
+            )
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 

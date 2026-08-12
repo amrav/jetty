@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
+import shlex
 import string
 
 from .config import GateConfig, OrchestratorConfig, ServiceConfig
@@ -19,22 +21,67 @@ class RenderError(ValueError):
     pass
 
 
+_ENV_FIELD = re.compile(r"^env\.([A-Za-z_][A-Za-z0-9_]*)$")
+#: An argv element that is nothing but one env placeholder — the splice form.
+_ENV_STANDALONE = re.compile(r"^\{env\.[A-Za-z_][A-Za-z0-9_]*(:-[^{}]*)?\}$")
+
+
+class _EnvValue:
+    """Carries the variable's name into format_field, where the default (the
+    format spec) is finally known."""
+
+    __slots__ = ("name", "value")
+
+    def __init__(self, name: str, value: str | None):
+        self.name = name
+        self.value = value
+
+
 class _Formatter(string.Formatter):
     """str.format's parser (so `{{`/`}}` and `}}}` disambiguate the way every
     Python user already expects), but with the whole field name — dots
-    included — treated as a flat context key instead of attribute access."""
+    included — treated as a flat context key instead of attribute access.
+
+    `{env.NAME}` substitutes an environment variable (an error if unset);
+    `{env.NAME:-default}` falls back to the default when the variable is
+    unset OR empty — the docker-compose `:-` convention, and the mechanism
+    that makes any config value operator-overridable without editing the
+    file."""
 
     def __init__(self, ctx: dict[str, str]):
         super().__init__()
         self._ctx = ctx
 
     def get_field(self, field_name, args, kwargs):
+        m = _ENV_FIELD.match(field_name)
+        if m:
+            name = m.group(1)
+            return _EnvValue(name, os.environ.get(name)), field_name
         if field_name not in self._ctx:
             known = ", ".join(sorted(self._ctx))
             raise RenderError(
-                f"unknown placeholder {{{field_name}}} (known: {known})"
+                f"unknown placeholder {{{field_name}}} (known: {known}, "
+                "env.<NAME>)"
             )
         return self._ctx[field_name], field_name
+
+    def format_field(self, value, spec):
+        if isinstance(value, _EnvValue):
+            if spec.startswith("-"):
+                return value.value if value.value else spec[1:]
+            if spec:
+                raise RenderError(
+                    f"bad spec {spec!r} for {{env.{value.name}}}; write "
+                    f"{{env.{value.name}}} or {{env.{value.name}:-default}}"
+                )
+            if value.value is None:
+                raise RenderError(
+                    f"environment variable {value.name} is not set and no "
+                    f"default was given (write {{env.{value.name}:-default}} "
+                    "to make it optional)"
+                )
+            return value.value
+        return super().format_field(value, spec)
 
 
 def build_context(
@@ -107,6 +154,29 @@ def resolve_command(argv: list[str], config_dir: str, what: str) -> list[str]:
     return argv
 
 
+def render_argv(
+    elements: list[str], ctx: dict[str, str], config_dir: str, what: str
+) -> list[str]:
+    """Render a command's elements, with one extra rule: an element that is
+    NOTHING BUT an env placeholder shell-splits after substitution, so
+    `"{env.API_FLAGS:-}"` contributes zero arguments when unset and several
+    when set to `"--reload --debug"` — optional flags without a wrapper
+    script. An env placeholder embedded in a larger element substitutes as
+    plain text and stays one argument."""
+    out: list[str] = []
+    for element in elements:
+        if _ENV_STANDALONE.match(element):
+            try:
+                out.extend(shlex.split(render_str(element, ctx)))
+            except ValueError as e:
+                raise RenderError(f"{what}: {element!r}: {e}") from None
+        else:
+            out.append(render_str(element, ctx))
+    if not out:
+        raise RenderError(f"{what}: command is empty after env substitution")
+    return resolve_command(out, config_dir, what)
+
+
 @dataclasses.dataclass(frozen=True)
 class RenderedService:
     cmd: list[str]
@@ -123,9 +193,7 @@ def render_service(
     config_dir: str,
     default_cwd: str | None = None,
 ) -> RenderedService:
-    cmd = resolve_command(
-        [render_str(a, ctx) for a in svc.cmd], config_dir, "cmd"
-    )
+    cmd = render_argv(svc.cmd, ctx, config_dir, "cmd")
     # The runtime directory: explicit and relative -> config-relative
     # (confined); explicit and absolute -> anywhere; unset -> the instance's
     # workdir (itself defaulting to the config's own directory), so a config
@@ -151,9 +219,7 @@ def render_service(
 def render_gate_argv(
     gate: GateConfig, ctx: dict[str, str], config_dir: str
 ) -> list[str]:
-    return resolve_command(
-        [render_str(a, ctx) for a in gate.check], config_dir, "gate check"
-    )
+    return render_argv(gate.check, ctx, config_dir, "gate check")
 
 
 def validate_templates(config: OrchestratorConfig, config_dir: str) -> None:
@@ -182,10 +248,6 @@ def validate_templates(config: OrchestratorConfig, config_dir: str) -> None:
         for gname, gate in config.gates.items():
             render_gate_argv(gate, ctx, config_dir)
         for rname, resolver in config.resolvers.items():
-            resolve_command(
-                [render_str(a, ctx) for a in resolver.cmd],
-                config_dir,
-                f"resolvers.{rname} cmd",
-            )
+            render_argv(resolver.cmd, ctx, config_dir, f"resolvers.{rname} cmd")
     except RenderError as e:
         raise ValueError(str(e)) from None
