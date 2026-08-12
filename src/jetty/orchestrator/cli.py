@@ -445,8 +445,6 @@ def _cmd_ps(args: argparse.Namespace) -> None:
                 last = i == len(nodes) - 1
                 rss = _human_bytes(procfs.rss_bytes([pid]))
                 cmd = procfs.cmdline(pid)
-                if len(cmd) > 100:
-                    cmd = cmd[:97] + "..."
                 print(f" {prefix}{'└─ ' if last else '├─ '}{pid:<7} {rss:>9}  {cmd}")
                 render(children.get(pid, []), prefix + ("   " if last else "│  "))
 
