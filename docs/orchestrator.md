@@ -371,6 +371,12 @@ session sweep under pgroup) for wedged instances.
 
 - *Which containment did I get?* — first line of `up` output
   (`containment=…`), or `jetty-orc status <name>`, or `doctor` before launch.
+- *Process tree* — `jetty-orc ps <name>`. Under cgroup containment the
+  standard tools work on the scope too (its path is in `status`/`ps`
+  output): `systemd-cgls <path>` for the kernel's own view of the tree,
+  `systemd-cgtop` for live per-cgroup usage. `ps` exists rather than
+  delegating to them because it also works under pgroup containment, adds
+  per-pid RSS and the service attribution, and needs no systemd on the box.
 - *A service crash-loops at startup* — read its log under
   `~/.jetty/logs/<instance>-<timestamp>/` (`jetty-orc status` prints the run's
   directory); the spawn header shows the exact rendered argv. `check` catches

@@ -191,19 +191,20 @@ after = ["web"]
         self.assertLen(pids, 2)
 
         # `ps` shows the whole tree: the tree service's child AND grandchild,
-        # the grandchild indented under its parent.
+        # the grandchild on a deeper branch under its parent.
         rc, output = self.orc_run("ps", "dev")
         self.assertEqual(rc, 0, output)
-        self.assertIn("[tree]", output)
+        self.assertIn("[tree", output)
         for pid in pids:
             self.assertIn(str(pid), output)
         parent_line, child_line = (
             line for line in output.splitlines() if "tree.py" in line or "sleep" in line
         )
+        self.assertIn("─ ", parent_line)  # pstree-style branch glyphs
         self.assertLess(
-            len(parent_line) - len(parent_line.lstrip()),
-            len(child_line) - len(child_line.lstrip()),
-            f"grandchild should be indented under its parent:\n{output}",
+            parent_line.index("─ "),
+            child_line.index("─ "),
+            f"grandchild should branch deeper than its parent:\n{output}",
         )
 
         run_dirs = os.listdir(self.env["JETTY_ORC_LOG_ROOT"])

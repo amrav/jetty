@@ -44,9 +44,11 @@ class Prefixer:
                 label = f"{_COLORS[i % len(_COLORS)]}{label}{RESET}"
             self._prefix[name] = label
 
+    def label(self, name: str) -> str:
+        return self._prefix.get(name, f"[{name}]")
+
     def format(self, name: str, line: str) -> str:
-        label = self._prefix.get(name, f"[{name}]")
-        return f"{label} {line}"
+        return f"{self.label(name)} {line}"
 
 
 class LineBuffer:

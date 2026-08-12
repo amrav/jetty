@@ -418,36 +418,39 @@ def _service_pids(record: dict, sname: str) -> list[int]:
 
 def _cmd_ps(args: argparse.Namespace) -> None:
     """The full process tree, service by service — every pid the containment
-    can enumerate, which under cgroup mode is every pid there is."""
+    can enumerate, which under cgroup mode is every pid there is. Rendered
+    pstree-style, with the same per-service colours as `logs` and `up`."""
     root = Path(args.root) if args.root else default_root()
     record = _resolve_instance(Registry(root), args.name)
     alive = supervisor_alive(record)
     cont = record.get("containment", {})
+    services = list(record.get("services", {}))
+    prefixer = console.Prefixer(services, console.want_color(sys.stdout))
     print(
         f"instance {record['name']} — supervisor pid "
         f"{record.get('supervisor_pid')}{'' if alive else ' (dead)'}, "
         f"containment {cont.get('kind')}"
         + (f" ({cont.get('root')})" if cont.get("root") else "")
     )
-    for sname in record.get("services", {}):
+    for sname in services:
         pids = set(_service_pids(record, sname))
-        print(f"[{sname}]" + ("" if pids else "  (no processes)"))
+        print(prefixer.label(sname) + ("" if pids else "  (no processes)"))
         children: dict[int | None, list[int]] = {}
         for pid in sorted(pids):
             parent = procfs.ppid(pid)
             children.setdefault(parent if parent in pids else None, []).append(pid)
 
-        def show(pid: int, depth: int) -> None:
-            rss = _human_bytes(procfs.rss_bytes([pid]))
-            cmd = procfs.cmdline(pid)
-            if len(cmd) > 100:
-                cmd = cmd[:97] + "..."
-            print(f"  {'  ' * depth}{pid:<8} {rss:>9}  {cmd}")
-            for child in children.get(pid, []):
-                show(child, depth + 1)
+        def render(nodes: list[int], prefix: str) -> None:
+            for i, pid in enumerate(nodes):
+                last = i == len(nodes) - 1
+                rss = _human_bytes(procfs.rss_bytes([pid]))
+                cmd = procfs.cmdline(pid)
+                if len(cmd) > 100:
+                    cmd = cmd[:97] + "..."
+                print(f" {prefix}{'└─ ' if last else '├─ '}{pid:<7} {rss:>9}  {cmd}")
+                render(children.get(pid, []), prefix + ("   " if last else "│  "))
 
-        for pid in children.get(None, []):
-            show(pid, 0)
+        render(children.get(None, []), "")
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
