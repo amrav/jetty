@@ -60,7 +60,12 @@ can be caught without spawning.
 
 ```toml
 [instance]
-name = "dev"                # [a-z0-9][a-z0-9_-]{0,63}; namespaces everything
+name = "dev"                # BASE name, [a-z0-9][a-z0-9_-]{0,63}: each `up`
+                            # appends a short random suffix (dev-a3f1) so one
+                            # config can run several instances concurrently.
+                            # `up --name <exact>` pins the name instead — do
+                            # that when you want a stable identity and a
+                            # stable {state_dir} across restarts.
 containment = "auto"        # auto | cgroup | scope | pgroup   (see Containment)
 # workdir = "~"             # default runtime dir for services/gates/resolvers;
                             # unset = the config file's own directory

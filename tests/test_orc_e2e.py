@@ -106,12 +106,23 @@ class OrcE2ETest(absltest.TestCase):
         return proc.stdout.read().decode() if proc.stdout else ""
 
     def record(self, name: str = "dev") -> dict | None:
-        path = os.path.join(self.env["JETTY_ORC_ROOT"], "registry", f"{name}.json")
+        """The registry record whose name is `name` or `name-<suffix>` —
+        instance names carry a random suffix unless pinned with --name."""
+        registry = os.path.join(self.env["JETTY_ORC_ROOT"], "registry")
         try:
-            with open(path) as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
+            entries = sorted(os.listdir(registry))
+        except OSError:
             return None
+        for entry in entries:
+            if entry == f"{name}.json" or (
+                entry.startswith(f"{name}-") and entry.endswith(".json")
+            ):
+                try:
+                    with open(os.path.join(registry, entry)) as f:
+                        return json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    return None
+        return None
 
     def wait_until(self, predicate, proc: subprocess.Popen | None = None, timeout=STARTUP_TIMEOUT_S, what=""):
         deadline = time.monotonic() + timeout
@@ -319,26 +330,59 @@ backoff_initial_seconds = 0.05
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
-    def test_duplicate_instance_name_refused(self):
+    def test_same_config_runs_twice_pinned_name_refused(self):
         config = self.write_config(
             f"""
 [instance]
 name = "dev"
 containment = "pgroup"
 
+[ports]
+api = "auto"
+
 [services.sleeper]
 cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
 """
         )
-        proc = self.orc("up", "-c", config)
+        first = self.orc("up", "-c", config)
         self.wait_until(
-            lambda: self.service_state("sleeper") == "running", proc, what="running"
+            lambda: self.service_state("sleeper") == "running", first, what="first up"
         )
-        rc, output = self.orc_run("up", "-c", config)
+        first_name = self.record()["name"]
+        self.assertRegex(first_name, r"^dev-[0-9a-f]{4}$")
+
+        # Same config again: a fresh suffix, no collision, disjoint ports.
+        second = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: len(
+                [
+                    e
+                    for e in os.listdir(
+                        os.path.join(self.env["JETTY_ORC_ROOT"], "registry")
+                    )
+                    if e.startswith("dev-")
+                ]
+            )
+            == 2,
+            second,
+            what="second instance registered",
+        )
+        rc, output = self.orc_run("ls")
+        self.assertEqual(output.count("dev-"), 2, output)
+
+        # A prefix query with two matches must refuse rather than guess.
+        rc, output = self.orc_run("status", "dev")
+        self.assertEqual(rc, 1)
+        self.assertIn("ambiguous", output)
+
+        # Pinning with --name gives back the old exclusive behaviour.
+        rc, output = self.orc_run("up", "-c", config, "--name", first_name)
         self.assertEqual(rc, 1)
         self.assertIn("already running", output)
-        proc.send_signal(signal.SIGINT)
-        proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
+
+        for proc in (first, second):
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
 
     def test_resolver_switches_binary_on_restart(self):
         """The release-deploy story: the resolver points at v2, the running v1

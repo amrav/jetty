@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
+import secrets
 import signal
 import sys
 import time
@@ -31,6 +33,9 @@ from .config import OrchestratorConfig, start_order
 from .registry import Registry, default_root, supervisor_alive
 from .render import validate_templates
 from .supervisor import Supervisor
+
+#: Like config's name rule but a little longer: base name + random suffix.
+_EXACT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,68}$")
 
 
 def _fail(message: str, code: int = 2) -> None:
@@ -61,6 +66,23 @@ def _self_argv() -> list[str]:
         mod = spec.name.removesuffix(".__main__")
         return [sys.executable, "-m", mod, *sys.argv[1:]]
     return list(sys.argv)
+
+
+def _resolve_instance(registry: Registry, query: str) -> dict:
+    """Exact instance name, or an unambiguous base-name prefix — so
+    `jetty-orc logs sf-dev` finds `sf-dev-a3f1` when it's the only one."""
+    record = registry.load(query)
+    if record is not None:
+        return record
+    matches = [
+        r for r in registry.load_all() if r["name"].startswith(query + "-")
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        names = ", ".join(sorted(r["name"] for r in matches))
+        _fail(f"{query!r} is ambiguous: {names}", code=1)
+    _fail(f"no instance named {query!r}", code=1)
 
 
 def _human_bytes(n: int | None) -> str:
@@ -151,18 +173,36 @@ def _services_summary(record: dict) -> str:
 def _cmd_up(args: argparse.Namespace) -> None:
     config = _load_config(args.config)
     root = Path(args.root) if args.root else default_root()
-    name = config.instance.name
-    record = Registry(root).load(name)
+    registry = Registry(root)
+    # `instance.name` is a BASE name: each `up` appends a short random suffix
+    # so the same config can run several instances concurrently. `--name`
+    # pins the exact name instead — the way to get a stable identity (and a
+    # stable {state_dir}) across restarts.
+    if args.name:
+        if not _EXACT_NAME_RE.match(args.name):
+            _fail(f"--name {args.name!r} must match {_EXACT_NAME_RE.pattern}")
+        name = args.name
+    else:
+        for _ in range(20):
+            name = f"{config.instance.name}-{secrets.token_hex(2)}"
+            if registry.load(name) is None:
+                break
+    config.instance.name = name
+    record = registry.load(name)
     if record and supervisor_alive(record):
         _fail(
             f"instance {name!r} is already running "
             f"(supervisor pid {record['supervisor_pid']}); "
-            f"`jetty-orc kill {name}` first, or use a different instance.name",
+            f"`jetty-orc kill {name}` first, or use a different --name",
             code=1,
         )
     try:
         backend = containment.acquire(
-            config.instance.containment, name, _self_argv()
+            # Pin the chosen name across the scope re-exec, or the re-entered
+            # process would roll a fresh suffix.
+            config.instance.containment,
+            name,
+            [*_self_argv(), "--name", name],
         )  # may re-exec under systemd-run and not return
     except containment.ContainmentError as e:
         _fail(str(e), code=1)
@@ -180,9 +220,7 @@ def _cmd_up(args: argparse.Namespace) -> None:
 
 def _cmd_logs(args: argparse.Namespace) -> None:
     root = Path(args.root) if args.root else default_root()
-    record = Registry(root).load(args.name)
-    if record is None:
-        _fail(f"no instance named {args.name!r}", code=1)
+    record = _resolve_instance(Registry(root), args.name)
     logs_dir = Path(record.get("logs_dir") or "")
     if not logs_dir.is_dir():
         _fail(f"no logs directory recorded for {args.name!r}", code=1)
@@ -290,9 +328,7 @@ def _cmd_ls(args: argparse.Namespace) -> None:
 
 def _cmd_status(args: argparse.Namespace) -> None:
     root = Path(args.root) if args.root else default_root()
-    record = Registry(root).load(args.name)
-    if record is None:
-        _fail(f"no instance named {args.name!r}", code=1)
+    record = _resolve_instance(Registry(root), args.name)
     alive = supervisor_alive(record)
     print(f"instance:    {record['name']}")
     print(f"state:       {record.get('state')}{'' if alive else '  (supervisor dead)'}")
@@ -331,12 +367,11 @@ def _cmd_status(args: argparse.Namespace) -> None:
 def _cmd_kill(args: argparse.Namespace) -> None:
     root = Path(args.root) if args.root else default_root()
     registry = Registry(root)
-    record = registry.load(args.name)
-    if record is None:
-        _fail(f"no instance named {args.name!r}", code=1)
+    record = _resolve_instance(registry, args.name)
+    name = record["name"]
     if not supervisor_alive(record):
-        registry.remove(args.name)
-        print(f"jetty-orc: instance {args.name!r} was already dead "
+        registry.remove(name)
+        print(f"jetty-orc: instance {name!r} was already dead "
               f"(state: {record.get('state')}); removed registry entry")
         return
     pid = record["supervisor_pid"]
@@ -355,13 +390,13 @@ def _cmd_kill(args: argparse.Namespace) -> None:
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
         if not supervisor_alive(record):
-            if registry.load(args.name) is not None:
-                registry.remove(args.name)
-            print(f"jetty-orc: instance {args.name!r} stopped")
+            if registry.load(name) is not None:
+                registry.remove(name)
+            print(f"jetty-orc: instance {name!r} stopped")
             return
         time.sleep(0.2)
     _fail(
-        f"instance {args.name!r} did not stop within {args.timeout:.0f}s; "
+        f"instance {name!r} did not stop within {args.timeout:.0f}s; "
         "try `jetty-orc kill --force`",
         code=1,
     )
@@ -432,6 +467,11 @@ def main(argv: list[str] | None = None) -> None:
         "-q",
         action="store_true",
         help="don't echo service output to the console (logs still written)",
+    )
+    p_up.add_argument(
+        "--name",
+        help="exact instance name (default: instance.name plus a random "
+        "suffix, so one config can run several instances)",
     )
     p_up.set_defaults(func=_cmd_up)
 
