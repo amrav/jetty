@@ -179,9 +179,18 @@ def parse_output(name: str, provides: list[str], stdout: str) -> dict[str, str]:
 class Resolvers:
     """All of an instance's resolvers, with per-resolver caching and locks."""
 
-    def __init__(self, configs: dict[str, ResolverConfig], argvs: dict[str, list[str]]):
+    def __init__(
+        self,
+        configs: dict[str, ResolverConfig],
+        argvs: dict[str, list[str]],
+        cwd: str | None = None,
+    ):
         self._configs = configs
         self._argvs = argvs  # cmd rendered against the static context
+        #: Resolver scripts run from the config file's directory: a script
+        #: that reads a sibling manifest means the same manifest from any
+        #: launch cwd.
+        self._cwd = cwd
         self._by_bin = {
             bin_name: rname
             for rname, cfg in configs.items()
@@ -243,6 +252,7 @@ class Resolvers:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
+                cwd=self._cwd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

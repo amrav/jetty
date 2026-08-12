@@ -62,6 +62,8 @@ can be caught without spawning.
 [instance]
 name = "dev"                # [a-z0-9][a-z0-9_-]{0,63}; namespaces everything
 containment = "auto"        # auto | cgroup | scope | pgroup   (see Containment)
+# workdir = "~"             # default runtime dir for services/gates/resolvers;
+                            # unset = the config file's own directory
 
 [ports]
 api = "auto"                # kernel-picked free port
@@ -125,7 +127,11 @@ treatment).
 
 Each service's runtime directory is its `cwd`: relative → config-relative
 and confined as above; absolute (including `~`, e.g. `cwd = "~"`) →
-anywhere; unset → the config file's own directory.
+anywhere; unset → `instance.workdir`, which itself defaults to the config
+file's own directory. Gate checks and resolver scripts also run from
+`instance.workdir` — so by default a resolver that reads a sibling manifest
+means the same manifest from any launch cwd, and setting `workdir`
+explicitly moves that default for the whole instance in one place.
 
 ### Environment
 

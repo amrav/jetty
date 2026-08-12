@@ -46,8 +46,8 @@ class ResolverConfig(Strict):
     """A script that maps names to binary paths, so "which binary" can change
     between releases without editing the config.
 
-    `cmd` is run in the supervisor's working directory; exit 0 with the paths
-    on stdout. A resolver providing ONE name may print just the path; one
+    `cmd` runs from the config file's directory (like every path a config
+    describes); exit 0 with the paths on stdout. A resolver providing ONE name may print just the path; one
     providing SEVERAL prints `name=path` lines (any order — order-dependence
     would let a reordered echo silently swap binaries). Names bound by one
     invocation are pinned together: they always come from the same run of the
@@ -148,6 +148,12 @@ class InstanceConfig(Strict):
     #: an owned cgroup > re-exec into a delegated systemd user scope > plain
     #: process groups. See containment.py for exactly what each provides.
     containment: Literal["auto", "cgroup", "scope", "pgroup"] = "auto"
+    #: Default runtime directory for everything the instance runs: services
+    #: without their own `cwd`, gate checks, resolver scripts. Placeholders
+    #: render; the usual path rules apply (relative = config-relative and
+    #: confined, `~`/absolute = anywhere). Unset = the config file's own
+    #: directory.
+    workdir: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> "InstanceConfig":

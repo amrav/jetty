@@ -32,6 +32,7 @@ from .render import (
     render_service,
     render_str,
     resolve_command,
+    resolve_config_path,
 )
 from .resolvers import Resolvers
 from .service import Service
@@ -108,11 +109,19 @@ class Supervisor:
             return 1
 
         ctx = build_context(name, self._ports, str(inst_dir), str(logs_dir))
+        workdir = self._config_dir
+        if cfg.instance.workdir is not None:
+            workdir = resolve_config_path(
+                render_str(cfg.instance.workdir, ctx),
+                self._config_dir,
+                "instance.workdir",
+            )
         gates = GateSet(
             {
                 n: (g, render_gate_argv(g, ctx, self._config_dir))
                 for n, g in cfg.gates.items()
-            }
+            },
+            cwd=workdir,
         )
         self._resolvers = Resolvers(
             cfg.resolvers,
@@ -124,6 +133,7 @@ class Supervisor:
                 )
                 for n, r in cfg.resolvers.items()
             },
+            cwd=workdir,
         )
         self._containment.setup(list(cfg.services))
 
@@ -163,7 +173,9 @@ class Supervisor:
                 if bins:
                     bin_ctx = await self._resolvers.context_for(bins)
                     self._enforce_pinning(sname, bins)
-                return render_service(svc_cfg, {**ctx, **bin_ctx}, self._config_dir)
+                return render_service(
+                    svc_cfg, {**ctx, **bin_ctx}, self._config_dir, default_cwd=workdir
+                )
 
             return render
 

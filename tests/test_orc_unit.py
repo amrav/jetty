@@ -189,6 +189,32 @@ class ConfigPathTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the config"):
             validate_templates(cfg, self.base)
 
+    def test_instance_workdir_is_the_default_cwd(self):
+        from jetty.orchestrator.render import render_service
+
+        svc = config_from(MINIMAL).services["api"]
+        ctx = build_context("dev", {}, "/s", "/l")
+        self.assertEqual(
+            render_service(svc, ctx, self.base, default_cwd="/somewhere").cwd,
+            "/somewhere",
+        )
+        # No workdir configured: the config file's directory.
+        self.assertEqual(render_service(svc, ctx, self.base).cwd, self.base)
+        # An explicit per-service cwd still wins over the instance default.
+        svc = config_from(MINIMAL + 'cwd = "~"\n').services["api"]
+        self.assertEqual(
+            render_service(svc, ctx, self.base, default_cwd="/somewhere").cwd,
+            os.path.expanduser("~"),
+        )
+
+    def test_escaping_instance_workdir_rejected_at_check(self):
+        cfg = config_from(
+            '[instance]\nname = "dev"\nworkdir = "../out"\n'
+            '[services.api]\ncmd = ["true"]\n'
+        )
+        with self.assertRaisesRegex(ValueError, "outside the config"):
+            validate_templates(cfg, self.base)
+
 
 class PortsTest(absltest.TestCase):
     def test_auto_ports_distinct(self):

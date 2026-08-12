@@ -118,15 +118,22 @@ class RenderedService:
 
 
 def render_service(
-    svc: ServiceConfig, ctx: dict[str, str], config_dir: str
+    svc: ServiceConfig,
+    ctx: dict[str, str],
+    config_dir: str,
+    default_cwd: str | None = None,
 ) -> RenderedService:
     cmd = resolve_command(
         [render_str(a, ctx) for a in svc.cmd], config_dir, "cmd"
     )
     # The runtime directory: explicit and relative -> config-relative
-    # (confined); explicit and absolute -> anywhere; unset -> the config's
-    # own directory, so a config means the same thing however it is launched.
-    cwd = render_str(svc.cwd, ctx) if svc.cwd is not None else config_dir
+    # (confined); explicit and absolute -> anywhere; unset -> the instance's
+    # workdir (itself defaulting to the config's own directory), so a config
+    # means the same thing however it is launched.
+    if svc.cwd is not None:
+        cwd = render_str(svc.cwd, ctx)
+    else:
+        cwd = default_cwd if default_cwd is not None else config_dir
     cwd = resolve_config_path(cwd, config_dir, "cwd")
     ready_path = render_str(svc.ready.path, ctx) if svc.ready.path else None
     if ready_path is not None:
@@ -164,6 +171,12 @@ def validate_templates(config: OrchestratorConfig, config_dir: str) -> None:
         for provided in resolver.provides:
             ctx[f"bin.{provided}"] = "/dev/null"
     try:
+        if config.instance.workdir is not None:
+            resolve_config_path(
+                render_str(config.instance.workdir, ctx),
+                config_dir,
+                "instance.workdir",
+            )
         for svc in config.services.values():
             render_service(svc, ctx, config_dir)
         for gname, gate in config.gates.items():

@@ -17,8 +17,16 @@ from .config import GateConfig
 
 
 class GateSet:
-    def __init__(self, gates: dict[str, tuple[GateConfig, list[str]]]):
+    def __init__(
+        self,
+        gates: dict[str, tuple[GateConfig, list[str]]],
+        cwd: str | None = None,
+    ):
         self._gates = gates
+        #: Checks run from the config file's directory, like everything else
+        #: a config describes — a `test -f flag` means the same flag wherever
+        #: the supervisor was launched from.
+        self._cwd = cwd
         self._cache: dict[str, tuple[float, bool]] = {}
         self._locks = {name: asyncio.Lock() for name in gates}
 
@@ -46,11 +54,11 @@ class GateSet:
             self._cache[name] = (time.monotonic(), ok)
             return ok
 
-    @staticmethod
-    async def _run(argv: list[str], timeout: float) -> bool:
+    async def _run(self, argv: list[str], timeout: float) -> bool:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
+                cwd=self._cwd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,

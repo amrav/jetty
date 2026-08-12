@@ -614,6 +614,45 @@ backoff_initial_seconds = 0.05
         self.assertIn("resolver 'app' exited 3", output)
         self.assertIn("release feed is down", output)
 
+    def test_everything_defaults_to_the_config_files_directory(self):
+        """Config in a subdir, supervisor launched from outside it: the
+        resolver reads its sibling manifest, and the service's default cwd is
+        the config's directory — nothing depends on the launch cwd."""
+        confdir = self.workdir.mkdir("confdir")
+        app = os.path.join(confdir.full_path, "app.py")
+        with open(app, "w") as f:
+            f.write(
+                f"#!{sys.executable}\nimport pathlib, time\n"
+                "pathlib.Path('marker.txt').write_text('here')\ntime.sleep(300)\n"
+            )
+        os.chmod(app, 0o755)
+        confdir.create_file("manifest.txt", content=app + "\n")
+        config = confdir.create_file(
+            "orc.toml",
+            content=f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["cat", "manifest.txt"]
+
+[services.app]
+cmd = ["{{bin.app}}"]
+""",
+        ).full_path
+        proc = self.orc("up", "-c", config)  # our cwd is workdir, NOT confdir
+        self.wait_until(
+            lambda: self.service_state("app") == "running",
+            proc,
+            what="running from a subdir config",
+        )
+        marker = os.path.join(confdir.full_path, "marker.txt")
+        self.wait_until(lambda: os.path.exists(marker), proc, what="marker in confdir")
+        self.assertFalse(os.path.exists("marker.txt"), "must not use the launch cwd")
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_up_echoes_prefixed_output_and_logs_command_replays_it(self):
         config = self.write_config(
             f"""
