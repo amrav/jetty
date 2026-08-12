@@ -191,6 +191,20 @@ class PortsTest(absltest.TestCase):
         return holder.getsockname()[1]
 
 
+class ServiceEnvTest(absltest.TestCase):
+    def test_cgroup_root_exported_only_under_cgroup_containment(self):
+        from jetty.orchestrator.containment import CgroupBackend, PgroupBackend
+        from jetty.orchestrator.supervisor import service_extra_env
+
+        cg = CgroupBackend(Path("/sys/fs/cgroup/fake.scope"))
+        env = service_extra_env("dev", cg)
+        self.assertEqual(env["JETTY_ORC_INSTANCE"], "dev")
+        self.assertEqual(env["JETTY_ORC_CGROUP_ROOT"], "/sys/fs/cgroup/fake.scope")
+
+        env = service_extra_env("dev", PgroupBackend())
+        self.assertNotIn("JETTY_ORC_CGROUP_ROOT", env)
+
+
 class RegistryTest(absltest.TestCase):
     def test_roundtrip_and_alive(self):
         root = self.create_tempdir()

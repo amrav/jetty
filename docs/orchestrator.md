@@ -97,8 +97,15 @@ grace_seconds = 10.0        # then SIGKILL to the whole group
 `{ports.<name>}`, `{instance.name}`, `{state_dir}`, `{logs_dir}` render into
 `cmd`, `env` values, `cwd`, readiness probes and gate argvs after ports are
 allocated. `{{` / `}}` escape literal braces (`str.format` parsing rules).
-Services also receive `JETTY_ORC_INSTANCE` and `JETTY_ORC_SERVICE` in their
-environment.
+
+Services also receive in their environment: `JETTY_ORC_INSTANCE`,
+`JETTY_ORC_SERVICE`, and — under cgroup containment — `JETTY_ORC_CGROUP_ROOT`,
+the instance's cgroup directory. A service that reports resource usage (a
+dashboard, a health endpoint) should read the instance's totals and process
+list from that directory (`memory.current`, `cgroup.procs` in its subtree)
+rather than from `/proc/self/cgroup`, which sees only the service's own
+subgroup and undercounts once sibling services hold the interesting
+processes.
 
 A jetty sidecar reads no environment variables, so to orchestrate one,
 generate its TOML (e.g. into `{state_dir}`) and pass `--config`.

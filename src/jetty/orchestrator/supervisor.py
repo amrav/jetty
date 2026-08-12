@@ -33,6 +33,22 @@ def _note(msg: str) -> None:
     print(f"jetty-orc: {msg}", file=sys.stderr)
 
 
+def service_extra_env(instance: str, containment: Containment) -> dict[str, str]:
+    """Environment every service receives beyond its own `env` table.
+
+    JETTY_ORC_CGROUP_ROOT is the instance's cgroup directory (cgroup
+    containment only): a service that reports resource usage — a dashboard,
+    a health endpoint — can account and enumerate the *whole instance* from
+    it, instead of just its own subgroup. Reading `/proc/self/cgroup` from
+    inside a service sees only that service's leaf, which silently
+    undercounts once siblings hold the interesting processes.
+    """
+    extra = {"JETTY_ORC_INSTANCE": instance}
+    if containment.kind == "cgroup" and containment.root:
+        extra["JETTY_ORC_CGROUP_ROOT"] = containment.root
+    return extra
+
+
 class Supervisor:
     def __init__(
         self,
@@ -84,7 +100,7 @@ class Supervisor:
         def notify(_svc: Service) -> None:
             self._write_record()
 
-        extra_env = {"JETTY_ORC_INSTANCE": name}
+        extra_env = service_extra_env(name, self._containment)
         for sname in start_order(cfg.services):
             svc_cfg = cfg.services[sname]
             self._services[sname] = Service(
