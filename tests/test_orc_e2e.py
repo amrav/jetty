@@ -62,6 +62,7 @@ class OrcE2ETest(absltest.TestCase):
                 f"{IMPORT_ROOT}{os.pathsep}{existing}" if existing else IMPORT_ROOT
             ),
             "JETTY_ORC_ROOT": os.path.join(self.workdir.full_path, "orcroot"),
+            "JETTY_ORC_LOG_ROOT": os.path.join(self.workdir.full_path, "orclogs"),
         }
 
     # -- harness --
@@ -176,6 +177,15 @@ after = ["web"]
         with open("pids.txt") as f:
             pids = [int(x) for x in f.read().split()]
         self.assertLen(pids, 2)
+
+        run_dirs = os.listdir(self.env["JETTY_ORC_LOG_ROOT"])
+        self.assertLen(run_dirs, 1)
+        self.assertStartsWith(run_dirs[0], "dev-")  # instance + timestamp
+        run_dir = os.path.join(self.env["JETTY_ORC_LOG_ROOT"], run_dirs[0])
+        self.assertEqual(record["logs_dir"], run_dir)
+        self.assertContainsSubset(
+            {"web.log", "tree.log"}, set(os.listdir(run_dir))
+        )
 
         proc.send_signal(signal.SIGINT)
         rc = proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
@@ -373,6 +383,90 @@ backoff_initial_seconds = 0.05
         self.wait_until(
             lambda: os.path.exists("ran-v2"), proc, what="v2 after restart"
         )
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
+    def test_pinned_binaries_restart_together_only_on_release_change(self):
+        """Two services pinned by one resolver. A crash on an unchanged
+        release restarts only the crasher; a crash after the release moved
+        drags the sibling along (budget-free) so the pair never runs split
+        across versions."""
+        for svc in ("a", "b"):
+            for version in ("v1", "v2"):
+                path = os.path.join(self.workdir.full_path, f"{svc}-{version}")
+                with open(path, "w") as f:
+                    f.write(
+                        f"#!{sys.executable}\nimport pathlib, time\n"
+                        f"pathlib.Path('ran-{svc}-{version}').touch()\ntime.sleep(300)\n"
+                    )
+                os.chmod(path, 0o755)
+
+        def manifest(version: str) -> str:
+            return "".join(
+                f"{svc}={self.workdir.full_path}/{svc}-{version}\n"
+                for svc in ("a", "b")
+            )
+
+        self.workdir.create_file("manifest.txt", content=manifest("v1"))
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.release]
+cmd = ["cat", "manifest.txt"]
+provides = ["a", "b"]
+cache_seconds = 0.0
+
+[services.svc_a]
+cmd = ["{{bin.a}}"]
+[services.svc_a.restart]
+backoff_initial_seconds = 0.05
+
+[services.svc_b]
+cmd = ["{{bin.b}}"]
+[services.svc_b.restart]
+backoff_initial_seconds = 0.05
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: os.path.exists("ran-a-v1") and os.path.exists("ran-b-v1"),
+            proc,
+            what="both on v1",
+        )
+        b_pid_v1 = self.record()["services"]["svc_b"]["pid"]
+
+        # Crash svc_a with the release unchanged: svc_b must not move.
+        os.kill(self.record()["services"]["svc_a"]["pid"], signal.SIGKILL)
+        self.wait_until(
+            lambda: (
+                self.service_state("svc_a") == "running"
+                and self.record()["services"]["svc_a"]["restarts"] >= 1
+            ),
+            proc,
+            what="svc_a restarted on the same release",
+        )
+        self.assertEqual(self.record()["services"]["svc_b"]["pid"], b_pid_v1)
+        self.assertFalse(os.path.exists("ran-a-v2"))
+
+        # The release moves; crash svc_a: both must come up on v2, and
+        # svc_b's bounce must not spend its restart budget.
+        with open("manifest.txt", "w") as f:
+            f.write(manifest("v2"))
+        os.kill(self.record()["services"]["svc_a"]["pid"], signal.SIGKILL)
+        self.wait_until(
+            lambda: os.path.exists("ran-a-v2") and os.path.exists("ran-b-v2"),
+            proc,
+            what="both on v2",
+        )
+        self.wait_until(
+            lambda: self.service_state("svc_b") == "running",
+            proc,
+            what="svc_b running again",
+        )
+        self.assertEqual(self.record()["services"]["svc_b"]["restarts"], 0)
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 

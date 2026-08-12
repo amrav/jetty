@@ -88,11 +88,25 @@ class Resolvers:
         self._cache: dict[str, tuple[float, dict[str, str]]] = {}
         #: For the registry / `status`: last successful resolution per resolver.
         self.state: dict[str, dict] = {}
+        #: Bumped only when a resolution's RESULT differs from the previous
+        #: one. This is what group-restart decisions key on: "the release
+        #: moved" is a generation change; a crash loop that keeps resolving
+        #: the same paths is not, and must not bounce healthy siblings.
+        self.generation: dict[str, int] = {}
+
+    def resolver_names(self, bin_names: set[str]) -> set[str]:
+        return {self._by_bin[b] for b in bin_names}
+
+    def generations_for(self, bin_names: set[str]) -> dict[str, int]:
+        return {
+            rname: self.generation.get(rname, 0)
+            for rname in self.resolver_names(bin_names)
+        }
 
     async def context_for(self, bin_names: set[str]) -> dict[str, str]:
         """`{bin.<name>}` context entries for one spawn. Raises ResolveError."""
         ctx: dict[str, str] = {}
-        for rname in sorted({self._by_bin[b] for b in bin_names}):
+        for rname in sorted(self.resolver_names(bin_names)):
             binaries = await self._resolve(rname)
             ctx.update({f"bin.{k}": v for k, v in binaries.items()})
         return ctx
@@ -106,6 +120,8 @@ class Resolvers:
                 if cfg.refresh == "instance" or age < cfg.cache_seconds:
                     return cached[1]
             binaries = await self._run(rname, cfg)
+            if cached is None or cached[1] != binaries:
+                self.generation[rname] = self.generation.get(rname, 0) + 1
             self._cache[rname] = (time.monotonic(), binaries)
             self.state[rname] = {"binaries": binaries, "resolved_at": time.time()}
             return binaries

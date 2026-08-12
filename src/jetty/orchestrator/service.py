@@ -74,6 +74,7 @@ class Service:
         self._fail_cb = fail
 
         self._stop_event = asyncio.Event()
+        self._bounce_requested = False
         self._fail_times: list[float] = []
         self._tail = bytearray()
         self._logf = None
@@ -111,6 +112,12 @@ class Service:
             code = await self._run_once()
             if self.stopping:
                 break
+            if self._bounce_requested:
+                # A supervisor-initiated restart (pinned binary group moved):
+                # not this service's fault, so no exit classification, no
+                # budget, no backoff — just come back up on the new release.
+                self._bounce_requested = False
+                continue
             self.last_exit = code
 
             if code in restart_cfg.no_restart_exit:
@@ -157,16 +164,34 @@ class Service:
         self._stop_event.set()
         if self.proc is not None and self.proc.returncode is None:
             self._set_state("stopping")
-            sig = getattr(signal, "SIG" + self._cfg.stop.signal)
-            self._containment.sweep(self.name, sig)
-            try:
-                await asyncio.wait_for(self.proc.wait(), self._cfg.stop.grace_seconds)
-            except TimeoutError:
-                self._log_note(
-                    f"no exit {self._cfg.stop.grace_seconds}s after "
-                    f"SIG{self._cfg.stop.signal}; escalating to SIGKILL"
-                )
+            await self._terminate_group()
         self._containment.sweep(self.name, signal.SIGKILL)
+
+    async def restart(self, reason: str) -> None:
+        """Supervisor-initiated bounce: terminate this incarnation so the run
+        loop respawns it — with fresh binary resolution, and without touching
+        the restart budget (the restart is nobody's crash). Used to keep
+        services whose binaries are pinned together on the same release."""
+        if self.stopping or self._bounce_requested:
+            return
+        if self.proc is None or self.proc.returncode is not None:
+            return  # between incarnations; the next spawn re-resolves anyway
+        self._bounce_requested = True
+        self._log_note(f"restarting: {reason}")
+        await self._terminate_group()
+        self._containment.sweep(self.name, signal.SIGKILL)
+
+    async def _terminate_group(self) -> None:
+        assert self.proc is not None
+        sig = getattr(signal, "SIG" + self._cfg.stop.signal)
+        self._containment.sweep(self.name, sig)
+        try:
+            await asyncio.wait_for(self.proc.wait(), self._cfg.stop.grace_seconds)
+        except TimeoutError:
+            self._log_note(
+                f"no exit {self._cfg.stop.grace_seconds}s after "
+                f"SIG{self._cfg.stop.signal}; escalating to SIGKILL"
+            )
 
     # -- internals --
 

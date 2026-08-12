@@ -9,7 +9,7 @@
 #   {ports.<name>}    a port allocated (or verified) at launch
 #   {instance.name}   this instance's name
 #   {state_dir}       per-instance state directory (put databases here)
-#   {logs_dir}        per-instance log directory
+#   {logs_dir}        this run's log directory (~/.jetty/logs/<name>-<timestamp>)
 
 [instance]
 name = "dev"

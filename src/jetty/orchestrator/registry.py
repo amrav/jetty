@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from . import procfs
@@ -24,6 +25,27 @@ def default_root() -> Path:
         "~/.local/state"
     )
     return Path(state_home) / "jetty-orc"
+
+
+def log_root() -> Path:
+    env = os.environ.get("JETTY_ORC_LOG_ROOT")
+    return Path(env) if env else Path.home() / ".jetty" / "logs"
+
+
+def new_run_logs_dir(instance: str) -> Path:
+    """One directory per `up` invocation — `<instance>-<timestamp>` — so the
+    logs of separate runs of the same instance never interleave. A same-second
+    collision (a supervisor crash-looping under an outer process manager) gets
+    a numeric suffix rather than appending into the previous run's files."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = log_root()
+    candidate = base / f"{instance}-{stamp}"
+    n = 2
+    while candidate.exists():
+        candidate = base / f"{instance}-{stamp}-{n}"
+        n += 1
+    candidate.mkdir(parents=True)
+    return candidate
 
 
 class Registry:

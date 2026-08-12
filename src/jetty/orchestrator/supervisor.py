@@ -24,7 +24,7 @@ from .config import OrchestratorConfig, service_bin_refs, start_order
 from .containment import Containment
 from .gates import GateSet
 from .ports import PortError, allocate_ports
-from .registry import Registry
+from .registry import Registry, new_run_logs_dir
 from .render import RenderedService, build_context, render_gate_argv, render_service, render_str
 from .resolvers import Resolvers
 from .service import Service
@@ -69,14 +69,22 @@ class Supervisor:
         self._created = 0.0
         self._registry: Registry | None = None
         self._resolvers: Resolvers | None = None
+        #: Per service: the resolver generations its live incarnation was
+        #: spawned from. The pinned-group invariant is enforced against this:
+        #: two services sharing a multi-binary resolver must not run on
+        #: different generations of it.
+        self._spawn_gens: dict[str, dict[str, int]] = {}
+        self._bounce_tasks: set[asyncio.Task] = set()
+        self._logs_dir: Path | None = None
         self._state = "starting"
 
     async def run(self) -> int:
         cfg = self._config
         name = cfg.instance.name
         inst_dir = self._root / "instances" / name
-        logs_dir = inst_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        inst_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = new_run_logs_dir(name)
+        self._logs_dir = logs_dir
         self._created = time.time()
         self._registry = Registry(self._root)
 
@@ -108,9 +116,12 @@ class Supervisor:
 
         extra_env = service_extra_env(name, self._containment)
 
-        def renderer(svc_cfg, bins: set[str]):
+        def renderer(sname: str, svc_cfg, bins: set[str]):
             async def render() -> RenderedService:
-                bin_ctx = await self._resolvers.context_for(bins) if bins else {}
+                bin_ctx = {}
+                if bins:
+                    bin_ctx = await self._resolvers.context_for(bins)
+                    self._enforce_pinning(sname, bins)
                 return render_service(svc_cfg, {**ctx, **bin_ctx})
 
             return render
@@ -120,7 +131,7 @@ class Supervisor:
             self._services[sname] = Service(
                 sname,
                 svc_cfg,
-                renderer(svc_cfg, service_bin_refs(svc_cfg)),
+                renderer(sname, svc_cfg, service_bin_refs(svc_cfg)),
                 self._containment,
                 gates,
                 logs_dir / f"{sname}.log",
@@ -187,6 +198,32 @@ class Supervisor:
         _note(f"instance {name!r} stopped cleanly")
         return 0
 
+    def _enforce_pinning(self, sname: str, bins: set[str]) -> None:
+        """Called as `sname` spawns. If it just came up on a NEW generation of
+        a resolver that pins several binaries together, every sibling still
+        running an older generation is bounced (a budget-free restart) so the
+        group can never run split across releases. Keyed on generation — the
+        counter moves only when the resolution's result changed — so a crash
+        loop on an unchanged release never touches healthy siblings."""
+        gens = self._resolvers.generations_for(bins)
+        self._spawn_gens[sname] = gens
+        for rname, gen in gens.items():
+            resolver = self._config.resolvers[rname]
+            if resolver.refresh != "spawn" or len(resolver.provides) < 2:
+                continue
+            for other, other_gens in self._spawn_gens.items():
+                if other == sname or other_gens.get(rname, gen) == gen:
+                    continue
+                task = asyncio.create_task(
+                    self._services[other].restart(
+                        f"binaries pinned by resolver {rname!r} moved to a new "
+                        f"release ({sname!r} spawned on it)"
+                    ),
+                    name=f"bounce:{other}",
+                )
+                self._bounce_tasks.add(task)
+                task.add_done_callback(self._bounce_tasks.discard)
+
     async def _stop_all(self) -> None:
         """Reverse dependency waves: a service is stopped only once everything
         that declared `after` it is already down."""
@@ -225,6 +262,7 @@ class Supervisor:
                 },
                 "ports": self._ports,
                 "state_dir": str(self._root / "instances" / self._config.instance.name),
+                "logs_dir": str(self._logs_dir),
                 "state": state,
                 "services": {n: s.status() for n, s in self._services.items()},
                 "resolvers": self._resolvers.state if self._resolvers else {},

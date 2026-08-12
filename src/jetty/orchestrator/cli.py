@@ -261,7 +261,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
         for rname, st in resolvers.items():
             for bname, path in st.get("binaries", {}).items():
                 print(f"  {bname:<20} {path}  (via {rname})")
-    print(f"logs:        {record.get('state_dir')}/logs/<service>.log")
+    print(f"logs:        {record.get('logs_dir')}/<service>.log")
 
 
 def _cmd_kill(args: argparse.Namespace) -> None:

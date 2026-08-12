@@ -140,9 +140,14 @@ the port its successor needs.
 Signals to the supervisor: first SIGINT/SIGTERM = clean stop of the whole
 instance (exit 0); a second = immediate hard kill of every service group.
 
-Logs: `<state_dir>/logs/<service>.log`, append-only, stdout+stderr merged,
-with orchestrator annotations (spawn headers, restart/gate notes) inline.
-The last ~8 KiB travels with failure reports.
+Logs: one file per service per run, under
+`~/.jetty/logs/<instance>-<timestamp>/` — the timestamp is the `up`
+invocation's, so separate runs of the same instance never interleave
+(`$JETTY_ORC_LOG_ROOT` overrides the location; old run directories are never
+deleted — prune them yourself). Append-only, stdout+stderr merged, with
+orchestrator annotations (spawn headers, restart/gate notes) inline;
+restarts within a run append under a fresh spawn header. The last ~8 KiB
+travels with failure reports.
 
 ## Dynamic binaries (resolvers)
 
@@ -177,10 +182,17 @@ Semantics worth relying on:
   atomically; services spawning within `cache_seconds` of each other share
   that invocation. A manifest read mid-release cannot hand the control plane
   one version and its harness another.
-- **Releases apply on respawn, never mid-flight**: a running process is
-  never touched; whichever service next crashes, is killed, or restarts
-  comes back on the new release. (`kill` + `up`, or killing one service's
-  pid, is therefore a deploy.)
+- **Pinned groups restart together**: when a service (re)spawns and its
+  multi-binary resolver has moved to a new release, every sibling still
+  running the previous release is bounced too — a budget-free restart, so
+  the group can never run split across versions. The trigger is the
+  resolution *result changing*, not the crash itself: a service
+  crash-looping on an unchanged release never touches its healthy siblings.
+- **Releases apply on respawn, never mid-flight**: the resolver moving does
+  not, by itself, touch any running process; the new release lands when a
+  service next crashes, is killed, or restarts (dragging its pinned
+  siblings along per the rule above). Killing one service's pid is
+  therefore a deploy.
 - **Resolver failure = spawn failure** of the service that asked: the
   ordinary restart budget and backoff apply, the script's stderr lands in
   the service log and any instance-failure report. A release that's
@@ -240,9 +252,9 @@ Root: `--root` flag > `$JETTY_ORC_ROOT` > `$XDG_STATE_HOME/jetty-orc`
 (default `~/.local/state/jetty-orc`). Layout:
 
 ```
-registry/<name>.json       # atomic-rename writes; one record per instance
-instances/<name>/          # {state_dir}: databases, generated configs, ...
-instances/<name>/logs/     # {logs_dir}: <service>.log
+<root>/registry/<name>.json           # atomic-rename writes; one per instance
+<root>/instances/<name>/              # {state_dir}: databases, generated configs, ...
+~/.jetty/logs/<name>-<timestamp>/     # {logs_dir}: <service>.log, one dir per run
 ```
 
 A record names its supervisor by pid **and** kernel start-ticks, so a
@@ -256,9 +268,10 @@ session sweep under pgroup) for wedged instances.
 
 - *Which containment did I get?* — first line of `up` output
   (`containment=…`), or `jetty-orc status <name>`, or `doctor` before launch.
-- *A service crash-loops at startup* — read `<state_dir>/logs/<svc>.log`;
-  the spawn header shows the exact rendered argv. `check` catches template
-  and reference mistakes without spawning.
+- *A service crash-loops at startup* — read its log under
+  `~/.jetty/logs/<instance>-<timestamp>/` (`jetty-orc status` prints the run's
+  directory); the spawn header shows the exact rendered argv. `check` catches
+  template and reference mistakes without spawning.
 - *Instance failed; what happened?* — the `up` stderr ends with the
   aggregated reason and log tail, and `ls` keeps showing the failed record
   until you `kill <name>` it.
