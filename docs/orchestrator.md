@@ -259,7 +259,10 @@ invocation's, so separate runs of the same instance never interleave
 deleted — prune them yourself). Append-only, stdout+stderr merged, with
 orchestrator annotations (spawn headers, restart/gate notes) inline;
 restarts within a run append under a fresh spawn header. The last ~8 KiB
-travels with failure reports.
+travels with failure reports. Resolver invocations get the same treatment —
+`resolver-<name>.log` beside the service logs (header, the script's stderr,
+and the resolved result or failure), included in `logs` and the `up`
+console; cache hits run nothing and log nothing.
 
 ## Dynamic binaries (resolvers)
 

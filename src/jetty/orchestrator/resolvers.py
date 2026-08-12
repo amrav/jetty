@@ -184,6 +184,8 @@ class Resolvers:
         configs: dict[str, ResolverConfig],
         argvs: dict[str, list[str]],
         cwd: str | None = None,
+        logs_dir: Path | None = None,
+        echo=None,
     ):
         self._configs = configs
         self._argvs = argvs  # cmd rendered against the static context
@@ -191,6 +193,12 @@ class Resolvers:
         #: that reads a sibling manifest means the same manifest from any
         #: launch cwd.
         self._cwd = cwd
+        #: Every invocation is logged like a service: header, the script's
+        #: stderr, and the outcome — to `resolver-<name>.log` in the run's
+        #: log dir, and live to the console via `echo(name, bytes)`. Cache
+        #: hits run nothing and log nothing.
+        self._logs_dir = logs_dir
+        self._echo = echo
         self._by_bin = {
             bin_name: rname
             for rname, cfg in configs.items()
@@ -243,12 +251,42 @@ class Resolvers:
                 self.state[rname]["copied_from"] = sources
             return binaries
 
+    def _log_lines(self, rname: str, lines: list[str]) -> None:
+        data = "\n".join(lines) + "\n"
+        if self._logs_dir is not None:
+            try:
+                with open(self._logs_dir / f"resolver-{rname}.log", "a") as f:
+                    f.write(data)
+            except OSError:
+                pass
+        if self._echo is not None:
+            self._echo(rname, data.encode())
+
     async def _run(
         self, rname: str, cfg: ResolverConfig
     ) -> tuple[dict[str, str], dict[str, str] | None, dict[str, str]]:
         """(binaries to use, sources if `copy` rewrote them, content
         fingerprints keyed by binary name)."""
         argv = self._argvs[rname]
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"=== jetty-orc resolve {stamp} :: {' '.join(argv)}"]
+        try:
+            result = await self._run_exec(rname, cfg, argv, lines)
+        except ResolveError as e:
+            lines.append(f"jetty-orc: {e}")
+            self._log_lines(rname, lines)
+            raise
+        binaries = result[0]
+        lines.append(
+            "jetty-orc: resolved "
+            + " ".join(f"{k}={v}" for k, v in binaries.items())
+        )
+        self._log_lines(rname, lines)
+        return result
+
+    async def _run_exec(
+        self, rname: str, cfg: ResolverConfig, argv: list[str], lines: list[str]
+    ) -> tuple[dict[str, str], dict[str, str] | None, dict[str, str]]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -269,8 +307,11 @@ class Resolvers:
             raise ResolveError(
                 f"resolver {rname!r} timed out after {cfg.timeout_seconds}s"
             )
+        stderr_text = stderr.decode(errors="replace").strip()
+        if stderr_text:
+            lines.append(stderr_text)
         if proc.returncode != 0:
-            tail = stderr.decode(errors="replace")[-_STDERR_TAIL:].strip()
+            tail = stderr_text[-_STDERR_TAIL:]
             raise ResolveError(
                 f"resolver {rname!r} exited {proc.returncode}"
                 + (f"; stderr: {tail}" if tail else "")
