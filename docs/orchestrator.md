@@ -139,6 +139,12 @@ An env placeholder embedded in a larger element (`"--x={env.Y:-}"`)
 substitutes as plain text and stays one argument. Env vars are read at
 render time, i.e. per spawn.
 
+Paths compose with this: substitution happens before path resolution, so
+`cwd = "{env.MY_PROJECT_DIR:-~/projects}"` uses the variable when set and
+falls back to `~/projects` — and a `~` inside the variable's value expands
+too. The usual rules then apply (absolute/`~` anywhere, relative confined
+to the config's subtree).
+
 Argv fields (`cmd`, gate `check`, resolver `cmd`) also accept a single
 string instead of a list — `cmd = "./run --flag"` is shell-*split*, not a
 shell: `&&` and pipes stay literal words; use `["bash", "-c", "..."]` for

@@ -195,6 +195,26 @@ class EnvSubstitutionTest(absltest.TestCase):
         with mock.patch.dict(os.environ, clear=True):
             validate_templates(cfg, self.base)  # defaults keep it valid
 
+    def test_cwd_from_env_with_tilde_default(self):
+        from jetty.orchestrator.render import render_service
+
+        svc = config_from(
+            MINIMAL + 'cwd = "{env.ORC_TEST_PROJECT_DIR:-~/projects}"\n'
+        ).services["api"]
+        with mock.patch.dict(os.environ, {"ORC_TEST_PROJECT_DIR": "/opt/proj"}):
+            self.assertEqual(render_service(svc, self.ctx, self.base).cwd, "/opt/proj")
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(
+                render_service(svc, self.ctx, self.base).cwd,
+                os.path.expanduser("~/projects"),
+            )
+        # A tilde inside the variable's value expands too.
+        with mock.patch.dict(os.environ, {"ORC_TEST_PROJECT_DIR": "~/work"}):
+            self.assertEqual(
+                render_service(svc, self.ctx, self.base).cwd,
+                os.path.expanduser("~/work"),
+            )
+
     def test_string_cmd_form_is_shell_split_not_a_shell(self):
         cfg = config_from(MINIMAL.replace('["true"]', '"./run --flag \'two words\' && echo hi"'))
         self.assertEqual(
