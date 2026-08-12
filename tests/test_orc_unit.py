@@ -399,6 +399,34 @@ class ResolverGateConfigTest(absltest.TestCase):
             )
 
 
+class ConsoleTest(absltest.TestCase):
+    def test_line_buffer_reassembles_chunks(self):
+        from jetty.orchestrator.console import LineBuffer
+
+        buf = LineBuffer()
+        self.assertEqual(buf.feed(b"hel"), [])
+        self.assertEqual(buf.feed(b"lo\nwor"), ["hello"])
+        self.assertEqual(buf.feed(b"ld\npartial"), ["world"])
+        self.assertEqual(buf.flush(), "partial")
+        self.assertIsNone(buf.flush())
+
+    def test_prefixer_pads_and_colors_only_when_asked(self):
+        from jetty.orchestrator.console import Prefixer
+
+        plain = Prefixer(["api", "webserver"], color=False)
+        self.assertEqual(plain.format("api", "x"), "[api      ] x")
+        self.assertEqual(plain.format("webserver", "x"), "[webserver] x")
+        colored = Prefixer(["api", "web"], color=True)
+        self.assertIn("\x1b[", colored.format("api", "x"))
+        # Distinct services get distinct colours.
+        self.assertNotEqual(
+            colored.format("api", "x").split("[api")[0],
+            colored.format("web", "x").split("[web")[0],
+        )
+        # Unknown names (a stray log file) degrade to a plain label.
+        self.assertEqual(plain.format("ghost", "x"), "[ghost] x")
+
+
 class ServiceEnvTest(absltest.TestCase):
     def test_cgroup_root_exported_only_under_cgroup_containment(self):
         from jetty.orchestrator.containment import CgroupBackend, PgroupBackend

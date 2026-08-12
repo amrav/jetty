@@ -614,6 +614,36 @@ backoff_initial_seconds = 0.05
         self.assertIn("resolver 'app' exited 3", output)
         self.assertIn("release feed is down", output)
 
+    def test_up_echoes_prefixed_output_and_logs_command_replays_it(self):
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.chatty]
+cmd = ["{sys.executable}", "-u", "-c", "import time; print('hello-from-chatty'); time.sleep(300)"]
+
+[services.sleeper]
+cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("chatty") == "running"
+            and self.service_state("sleeper") == "running",
+            proc,
+            what="both running",
+        )
+        rc, output = self.orc_run("logs", "dev")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("[chatty ] hello-from-chatty", output)  # padded to 'sleeper'
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0)
+        # The foreground view carried the same prefixed line (uncoloured:
+        # the pipe is not a tty).
+        self.assertIn("[chatty ] hello-from-chatty", self.output_of(proc))
+
     def test_ls_status_and_kill(self):
         config = self.write_config(
             f"""

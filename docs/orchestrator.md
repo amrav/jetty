@@ -36,8 +36,16 @@ jetty-orc check -c orchestrator.example.toml  # validate config, spawn nothing
 jetty-orc up    -c orchestrator.example.toml  # run in the foreground; Ctrl-C stops all
 jetty-orc ls                                  # every instance, from any terminal
 jetty-orc status <name>                       # one instance, per service
+jetty-orc logs <name> [-f] [-n 50]            # prefixed service logs, tail with -f
 jetty-orc kill <name> [--force]               # stop it from outside
 ```
+
+`up` runs `concurrently`-style: every service's output streams to the
+console under a coloured `[service]` prefix (line-buffered, so lines never
+interleave; colour only on a TTY, `NO_COLOR` respected; `--quiet` turns the
+echo off). `logs` gives the same view from any other terminal — the last
+`-n` lines per service, `-f` to keep tailing, and it works on a failed
+instance's post-mortem logs too.
 
 Exit codes match the jetty binary's contract: `0` clean stop, `1` runtime
 failure (instance failed, port occupied, kill timed out), `2` config error —

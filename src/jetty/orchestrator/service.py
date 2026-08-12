@@ -52,6 +52,7 @@ class Service:
         notify: Callable[["Service"], None],
         fail: Callable[[str, "Service"], None],
         requires: list[str] | None = None,
+        echo: Callable[[bytes], None] | None = None,
     ):
         self.name = name
         self.log_path = log_path
@@ -77,6 +78,9 @@ class Service:
         self._extra_env = extra_env
         self._notify = notify
         self._fail_cb = fail
+        #: Live console sink (the `up` foreground view); the log file is the
+        #: durable copy, this is the visible one.
+        self._echo = echo
 
         self._stop_event = asyncio.Event()
         self._bounce_requested = False
@@ -300,6 +304,8 @@ class Service:
                 self._logf.write(chunk)
             except ValueError:
                 pass  # closed under us during teardown
+        if self._echo is not None:
+            self._echo(chunk)
         self._tail.extend(chunk)
         del self._tail[:-_TAIL_BYTES]
 
@@ -313,6 +319,8 @@ class Service:
                     f.write(data)
             except OSError:
                 pass
+            if self._echo is not None:
+                self._echo(data)
             self._tail.extend(data)
             del self._tail[:-_TAIL_BYTES]
             return

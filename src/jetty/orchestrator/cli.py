@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import containment, procfs
+from . import console, containment, procfs
 from .config import OrchestratorConfig, start_order
 from .registry import Registry, default_root, supervisor_alive
 from .render import validate_templates
@@ -172,9 +172,69 @@ def _cmd_up(args: argparse.Namespace) -> None:
             root=root,
             containment=backend,
             config_path=str(Path(args.config).resolve()),
+            quiet=args.quiet,
         ).run()
     )
     raise SystemExit(rc)
+
+
+def _cmd_logs(args: argparse.Namespace) -> None:
+    root = Path(args.root) if args.root else default_root()
+    record = Registry(root).load(args.name)
+    if record is None:
+        _fail(f"no instance named {args.name!r}", code=1)
+    logs_dir = Path(record.get("logs_dir") or "")
+    if not logs_dir.is_dir():
+        _fail(f"no logs directory recorded for {args.name!r}", code=1)
+
+    def discover() -> list[Path]:
+        return sorted(logs_dir.glob("*.log"))
+
+    files = discover()
+    if not files and not args.follow:
+        _fail(f"no service logs yet in {logs_dir}", code=1)
+    # Every service name is known from the record up front, so the prefix
+    # column width and colours stay stable even for a service whose log file
+    # only appears mid-tail.
+    names = list(record.get("services") or {}) or [f.stem for f in files]
+    prefixer = console.Prefixer(
+        sorted(set(names) | {f.stem for f in files}),
+        console.want_color(sys.stdout),
+    )
+
+    def print_tail(path: Path) -> int:
+        """Last `--lines` lines, prefixed; returns the offset tailing should
+        continue from (the end of the file)."""
+        data = path.read_bytes()
+        for line in data.splitlines()[-args.lines :]:
+            print(prefixer.format(path.stem, line.decode(errors="replace")))
+        return len(data)
+
+    offsets = {path: print_tail(path) for path in files}
+    if not args.follow:
+        return
+    buffers = {path: console.LineBuffer() for path in files}
+    try:
+        while True:
+            time.sleep(0.3)
+            for path in discover():
+                if path not in offsets:  # a service spawned after we started
+                    offsets[path] = 0
+                    buffers[path] = console.LineBuffer()
+                try:
+                    size = path.stat().st_size
+                    if size <= offsets[path]:
+                        continue
+                    with open(path, "rb") as f:
+                        f.seek(offsets[path])
+                        chunk = f.read()
+                except OSError:
+                    continue
+                offsets[path] += len(chunk)
+                for line in buffers[path].feed(chunk):
+                    print(prefixer.format(path.stem, line), flush=True)
+    except KeyboardInterrupt:
+        return
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
@@ -367,7 +427,23 @@ def main(argv: list[str] | None = None) -> None:
 
     p_up = sub.add_parser("up", help="run an instance in the foreground")
     p_up.add_argument("--config", "-c", required=True, help="path to instance TOML")
+    p_up.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="don't echo service output to the console (logs still written)",
+    )
     p_up.set_defaults(func=_cmd_up)
+
+    p_logs = sub.add_parser(
+        "logs", help="show (or follow) an instance's service logs, prefixed"
+    )
+    p_logs.add_argument("name")
+    p_logs.add_argument("--follow", "-f", action="store_true", help="keep tailing")
+    p_logs.add_argument(
+        "--lines", "-n", type=int, default=20, help="initial lines per service"
+    )
+    p_logs.set_defaults(func=_cmd_logs)
 
     p_check = sub.add_parser("check", help="validate a config, spawn nothing")
     p_check.add_argument("--config", "-c", required=True)
