@@ -286,18 +286,19 @@ copy_keep_days = 7.0
 
 The orchestrator package is **stdlib-only** (enforced by a test — a
 dependency creeping in fails CI, not a deploy). That makes the deployment
-story one file:
+story a copied directory:
 
 ```sh
-scripts/build-orc.sh          # -> dist/jetty-orc.pyz (~40 KB)
-scp dist/jetty-orc.pyz box:   # any Linux with Python 3.11+; no pip, no venv
-./jetty-orc.pyz doctor
+scp -r src/jetty/orchestrator box:jetty_orc   # any Linux with Python 3.11+
+python3 jetty_orc doctor                      # no pip, no venv, no installs
+python3 jetty_orc up -c orc.toml
 ```
 
-The zipapp is the whole tool — `up`, `logs`, `ps`, gates, resolvers,
-containment included. Vendoring into another build system (bazel) is equally
-simple: copy `src/jetty/orchestrator/` to any package path (all intra-package
-imports are relative) and point a binary at its `cli:main`.
+The directory can live anywhere and be named anything that is a valid
+Python module name (`jetty_orc`, `orchestrator`, …). It is the whole tool —
+`up`, `logs`, `ps`, gates, resolvers, containment included. Vendoring into
+another build system (bazel) is the same move: copy it to any package path
+(all intra-package imports are relative) and point a binary at `cli:main`.
 
 ## Containment
 

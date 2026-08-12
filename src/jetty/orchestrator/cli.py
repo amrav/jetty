@@ -58,16 +58,18 @@ def _load_config(path_str: str) -> OrchestratorConfig:
 def _self_argv() -> list[str]:
     """Reconstruct how to re-invoke this CLI (for the scope re-exec), without
     hardcoding a module path — the package may live at a different import
-    path when vendored into another build system, or be a zipapp."""
+    path when vendored into another build system, or be a bare directory
+    run as `python3 <dir>`."""
     import __main__
 
     spec = getattr(__main__, "__spec__", None)
     if spec and spec.name and spec.name != "__main__":
         mod = spec.name.removesuffix(".__main__")
         return [sys.executable, "-m", mod, *sys.argv[1:]]
-    # A console script or a zipapp: argv[0] is the thing to re-run, directly
-    # if executable, else through the interpreter.
-    if os.access(sys.argv[0], os.X_OK):
+    # A console script, or `python3 <dir>` on a bare copy: argv[0] is the
+    # thing to re-run — directly if it is an executable file, else through
+    # the interpreter (a directory passes X_OK but is not executable).
+    if os.path.isfile(sys.argv[0]) and os.access(sys.argv[0], os.X_OK):
         return list(sys.argv)
     return [sys.executable, *sys.argv]
 

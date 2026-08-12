@@ -18,8 +18,8 @@ Launches a named *instance* — a group of services described in TOML — with:
 This package is standalone by design: it imports nothing from jetty core and
 NOTHING outside the standard library, so it can be vendored into another
 build system (e.g. bazel) at any module path — all intra-package imports are
-relative — or shipped as a single zipapp (`scripts/build-orc.sh`) that runs
-on any box with Python 3.11+, no installs required.
+relative — or deployed by copying this directory to any box with Python
+3.11+ and running `python3 <dir> ...`, no installs required.
 """
 
 from .config import OrchestratorConfig

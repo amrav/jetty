@@ -5,12 +5,11 @@ as a confusing runtime failure is rejected at load time — unknown keys,
 wrong types, dangling references, dependency cycles, duplicate fixed ports.
 A config that loads is a config that can at least be *attempted*.
 
-Validation is hand-rolled on purpose. The orchestrator is stdlib-only so it
-can be distributed as a single zipapp (`scripts/build-orc.sh`) and run on
-any box with Python 3.11+ — no pip, no venv, no wheels. The validation
-surface is small and stable; a dependency for it would be the only
-dependency, and it would cost exactly the deployment story this tool exists
-to provide.
+Validation is hand-rolled on purpose. The orchestrator is stdlib-only so a
+bare copy of the package directory runs on any box with Python 3.11+
+(`python3 <dir> ...`) — no pip, no venv, no wheels. The validation surface
+is small and stable; a dependency for it would be the only dependency, and
+it would cost exactly the deployment story this tool exists to provide.
 """
 
 from __future__ import annotations

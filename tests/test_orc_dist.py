@@ -1,18 +1,19 @@
 """The orchestrator's distribution invariants.
 
 The whole deployment story rests on one property: `jetty.orchestrator`
-imports NOTHING outside the standard library, so a zipapp of it runs on any
-Python 3.11+ with no installs. That property is enforced here — a dependency
-creeping in should fail a test, not a deploy.
+imports NOTHING outside the standard library, so a bare copy of the
+directory runs on any Python 3.11+ with `python3 <dir>` — no pip, no venv.
+That property is enforced here — a dependency creeping in should fail a
+test, not a deploy.
 """
 
 from __future__ import annotations
 
 import ast
 import os
+import shutil
 import subprocess
 import sys
-import zipapp
 
 from absl.testing import absltest
 
@@ -48,32 +49,26 @@ class StdlibOnlyTest(absltest.TestCase):
         )
 
 
-class ZipappTest(absltest.TestCase):
-    def test_zipapp_builds_and_runs(self):
+class BareCopyTest(absltest.TestCase):
+    def test_a_copied_directory_runs_directly(self):
+        """`cp -r` the package anywhere, `python3 <dir> ...` — the shipped
+        way to run this on a box with nothing installed."""
         workdir = self.create_tempdir()
-        stage = workdir.mkdir("stage")
-        pkg = stage.mkdir("jetty_orc")
-        for entry in os.listdir(PACKAGE_DIR):
-            if entry.endswith(".py"):
-                with open(os.path.join(PACKAGE_DIR, entry)) as f:
-                    pkg.create_file(entry, content=f.read())
-        stage.create_file(
-            "__main__.py", content="from jetty_orc.cli import main\n\nmain()\n"
+        copy = os.path.join(workdir.full_path, "jetty_orc")
+        shutil.copytree(
+            PACKAGE_DIR, copy, ignore=shutil.ignore_patterns("__pycache__")
         )
-        pyz = os.path.join(workdir.full_path, "jetty-orc.pyz")
-        zipapp.create_archive(stage.full_path, pyz)
-
         config = workdir.create_file(
             "orc.toml",
             content='[instance]\nname = "dev"\n[services.api]\ncmd = ["true"]\n',
         ).full_path
-        # An empty PYTHONPATH proves the archive is self-contained: nothing
+        # An empty PYTHONPATH proves the copy is self-contained: nothing
         # from this checkout or its venv is importable.
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         outputs = {}
         for args in (["check", "-c", config], ["doctor"]):
             result = subprocess.run(
-                [sys.executable, pyz, *args],
+                [sys.executable, copy, *args],
                 capture_output=True,
                 text=True,
                 env=env,
