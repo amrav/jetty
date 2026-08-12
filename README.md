@@ -42,13 +42,17 @@ component.
 ## Quick start
 
 ```sh
-uv venv && uv pip install -e '.[dev]'
+uv sync --extra dev        # .venv from the committed uv.lock
 
 .venv/bin/jetty --config jetty.example.toml --check   # validate, don't bind
 .venv/bin/jetty --config jetty.example.toml          # serve
 
 curl --unix-socket /tmp/jetty/jetty.sock http://localhost/v1/meta
 ```
+
+Dependencies are locked: `uv.lock` is committed, CI installs with
+`uv sync --locked`, and changing `pyproject.toml` means re-running `uv lock`
+and committing the result.
 
 Tests are [absltest](https://abseil.io/docs/python/guides/testing); each file is
 also a standalone binary. Temp files, sockets and config all live under the
