@@ -51,6 +51,27 @@ def session_id(pid: int) -> int | None:
     return int(fields[3]) if fields else None
 
 
+def ppid(pid: int) -> int | None:
+    fields = _stat_fields(pid)
+    return int(fields[1]) if fields else None
+
+
+def cmdline(pid: int) -> str:
+    """The process's argv joined with spaces, falling back to the kernel's
+    comm for kernel threads and processes mid-exec."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    argv = [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+    if argv:
+        return " ".join(argv)
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
 def all_pids() -> list[int]:
     return [int(e) for e in os.listdir("/proc") if e.isdigit()]
 

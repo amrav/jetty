@@ -16,9 +16,10 @@ Launches a named *instance* — a group of services described in TOML — with:
   - a registry of running instances for `jetty-orc ls` / `status` / `kill`.
 
 This package is standalone by design: it imports nothing from jetty core and
-depends only on the stdlib and pydantic, so it can be vendored into another
+NOTHING outside the standard library, so it can be vendored into another
 build system (e.g. bazel) at any module path — all intra-package imports are
-relative.
+relative — or shipped as a single zipapp (`scripts/build-orc.sh`) that runs
+on any box with Python 3.11+, no installs required.
 """
 
 from .config import OrchestratorConfig

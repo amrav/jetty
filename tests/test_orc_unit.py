@@ -29,7 +29,7 @@ from jetty.orchestrator.render import (  # noqa: E402
 
 
 def config_from(text: str) -> OrchestratorConfig:
-    return OrchestratorConfig.model_validate(tomllib.loads(text))
+    return OrchestratorConfig.parse(tomllib.loads(text))
 
 
 MINIMAL = """

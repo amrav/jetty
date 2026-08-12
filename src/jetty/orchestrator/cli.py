@@ -58,14 +58,18 @@ def _load_config(path_str: str) -> OrchestratorConfig:
 def _self_argv() -> list[str]:
     """Reconstruct how to re-invoke this CLI (for the scope re-exec), without
     hardcoding a module path — the package may live at a different import
-    path when vendored into another build system."""
+    path when vendored into another build system, or be a zipapp."""
     import __main__
 
     spec = getattr(__main__, "__spec__", None)
-    if spec and spec.name:
+    if spec and spec.name and spec.name != "__main__":
         mod = spec.name.removesuffix(".__main__")
         return [sys.executable, "-m", mod, *sys.argv[1:]]
-    return list(sys.argv)
+    # A console script or a zipapp: argv[0] is the thing to re-run, directly
+    # if executable, else through the interpreter.
+    if os.access(sys.argv[0], os.X_OK):
+        return list(sys.argv)
+    return [sys.executable, *sys.argv]
 
 
 def _resolve_instance(registry: Registry, query: str) -> dict:
@@ -402,6 +406,48 @@ def _cmd_kill(args: argparse.Namespace) -> None:
     )
 
 
+def _service_pids(record: dict, sname: str) -> list[int]:
+    cont = record.get("containment", {})
+    if cont.get("kind") == "cgroup" and cont.get("root"):
+        return procfs.cgroup_procs(Path(cont["root"]) / f"svc-{sname}")
+    pid = record.get("services", {}).get(sname, {}).get("pid")
+    return procfs.session_members({pid}) if pid else []
+
+
+def _cmd_ps(args: argparse.Namespace) -> None:
+    """The full process tree, service by service — every pid the containment
+    can enumerate, which under cgroup mode is every pid there is."""
+    root = Path(args.root) if args.root else default_root()
+    record = _resolve_instance(Registry(root), args.name)
+    alive = supervisor_alive(record)
+    cont = record.get("containment", {})
+    print(
+        f"instance {record['name']} — supervisor pid "
+        f"{record.get('supervisor_pid')}{'' if alive else ' (dead)'}, "
+        f"containment {cont.get('kind')}"
+        + (f" ({cont.get('root')})" if cont.get("root") else "")
+    )
+    for sname in record.get("services", {}):
+        pids = set(_service_pids(record, sname))
+        print(f"[{sname}]" + ("" if pids else "  (no processes)"))
+        children: dict[int | None, list[int]] = {}
+        for pid in sorted(pids):
+            parent = procfs.ppid(pid)
+            children.setdefault(parent if parent in pids else None, []).append(pid)
+
+        def show(pid: int, depth: int) -> None:
+            rss = _human_bytes(procfs.rss_bytes([pid]))
+            cmd = procfs.cmdline(pid)
+            if len(cmd) > 100:
+                cmd = cmd[:97] + "..."
+            print(f"  {'  ' * depth}{pid:<8} {rss:>9}  {cmd}")
+            for child in children.get(pid, []):
+                show(child, depth + 1)
+
+        for pid in children.get(None, []):
+            show(pid, 0)
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     del args
     uid = os.getuid()
@@ -495,6 +541,12 @@ def main(argv: list[str] | None = None) -> None:
     p_status = sub.add_parser("status", help="per-service detail for one instance")
     p_status.add_argument("name")
     p_status.set_defaults(func=_cmd_status)
+
+    p_ps = sub.add_parser(
+        "ps", help="full process tree of an instance, service by service"
+    )
+    p_ps.add_argument("name")
+    p_ps.set_defaults(func=_cmd_ps)
 
     p_kill = sub.add_parser("kill", help="stop an instance")
     p_kill.add_argument("name")

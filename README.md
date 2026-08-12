@@ -68,10 +68,13 @@ flags, so every test that asks for a temp path would fail on `--test_tmpdir`.
 
 ## Orchestrator (`jetty-orc`)
 
-`jetty.orchestrator` is a separate, standalone package in this repo (stdlib +
-pydantic only, no jetty-core imports, all-relative intra-package imports — it
-can be vendored into another build system at any module path). It launches and
-supervises a named *instance* of a multi-process stack, Linux only:
+`jetty.orchestrator` is a separate, standalone package in this repo —
+**stdlib-only** (test-enforced), no jetty-core imports, all-relative
+intra-package imports — so it vendors into another build system at any module
+path, and `scripts/build-orc.sh` packs it into a single ~40 KB
+`jetty-orc.pyz` that runs on any Linux box with Python 3.11+, nothing to
+install. It launches and supervises a named *instance* of a multi-process
+stack, Linux only:
 
 - kernel-backed containment — an owned cgroup v2 subtree (one subgroup per
   service, `cgroup.kill` teardown, memory/CPU accounting), acquired directly

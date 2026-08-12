@@ -36,6 +36,7 @@ jetty-orc check -c orchestrator.example.toml  # validate config, spawn nothing
 jetty-orc up    -c orchestrator.example.toml  # run in the foreground; Ctrl-C stops all
 jetty-orc ls                                  # every instance, from any terminal
 jetty-orc status <name>                       # one instance, per service
+jetty-orc ps <name>                           # full process tree, per service
 jetty-orc logs <name> [-f] [-n 50]            # prefixed service logs, tail with -f
 jetty-orc kill <name> [--force]               # stop it from outside
 ```
@@ -280,6 +281,23 @@ copy_keep_days = 7.0
   expire; last month's releases do.
 
 `status` shows both the local path and the source it was copied from.
+
+## Distribution
+
+The orchestrator package is **stdlib-only** (enforced by a test — a
+dependency creeping in fails CI, not a deploy). That makes the deployment
+story one file:
+
+```sh
+scripts/build-orc.sh          # -> dist/jetty-orc.pyz (~40 KB)
+scp dist/jetty-orc.pyz box:   # any Linux with Python 3.11+; no pip, no venv
+./jetty-orc.pyz doctor
+```
+
+The zipapp is the whole tool — `up`, `logs`, `ps`, gates, resolvers,
+containment included. Vendoring into another build system (bazel) is equally
+simple: copy `src/jetty/orchestrator/` to any package path (all intra-package
+imports are relative) and point a binary at its `cli:main`.
 
 ## Containment
 
