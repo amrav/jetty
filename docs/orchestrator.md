@@ -108,6 +108,39 @@ signal = "TERM"             # TERM | INT | HUP, sent to the whole group
 grace_seconds = 10.0        # then SIGKILL to the whole group
 ```
 
+### Inheritance
+
+A config can extend one other config (single inheritance; chains like
+dev → staging → prod are fine, cycles are errors):
+
+```toml
+# dev.toml
+extends = "prod.toml"        # usual path rules: relative = this file's
+                             # subtree, ~/absolute = anywhere
+
+[instance]
+name = "sf-dev"
+
+[ports]
+api = "8000+"                # replaces prod's fixed port
+
+[services.api.env]
+STARFLEET_DEMO = "1"         # tables deep-merge: only this key changes
+
+[services]
+metrics = false              # `false` deletes an inherited service
+```
+
+Merge rules: tables merge recursively with the child winning; scalars,
+arrays and argv strings replace wholesale (a child wanting a different
+`cmd` states the whole cmd — positional list-splicing is a guessing game);
+overriding an inherited table with `false` deletes it. `extends` resolves
+before validation, so `check` and every load-time error apply to the merged
+result. One anchoring note: relative paths *inside* the merged config
+(cwd, scripts) resolve against the **entry** config's directory — keep
+parent and child side by side (the normal layout), or use
+absolute/`~`/`{env.*}` paths in the parent.
+
 ### Placeholders
 
 `{ports.<name>}`, `{instance.name}`, `{home}`, `{state_dir}`, `{logs_dir}`
