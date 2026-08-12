@@ -33,6 +33,7 @@ details stay internal.
 | `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
 | `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `filesystem`, `xmanager` | Names reserved only |
+| Orchestrator `jetty-orc` ([`docs/orchestrator.md`](docs/orchestrator.md)) — companion tool, not a module | **Implemented, tested** |
 
 Enabling an unimplemented module fails at boot with `unknown module` rather than
 serving stub answers — the correct fail-closed behaviour for a security
@@ -60,6 +61,39 @@ directory absltest hands out, so nothing assumes a writable `/tmp`.
 
 `run_all.py` rather than `unittest discover`: unittest never parses absl's
 flags, so every test that asks for a temp path would fail on `--test_tmpdir`.
+
+## Orchestrator (`jetty-orc`)
+
+`jetty.orchestrator` is a separate, standalone package in this repo (stdlib +
+pydantic only, no jetty-core imports, all-relative intra-package imports — it
+can be vendored into another build system at any module path). It launches and
+supervises a named *instance* of a multi-process stack, Linux only:
+
+- kernel-backed containment — an owned cgroup v2 subtree (one subgroup per
+  service, `cgroup.kill` teardown, memory/CPU accounting), acquired directly
+  when running under a delegated unit or via a `systemd-run --user --scope
+  -p Delegate=yes` re-exec; plain process groups as the fallback. Ctrl-C, a
+  crash of the supervisor (children get `PR_SET_PDEATHSIG`), or `jetty-orc
+  kill` take down the whole tree, double-forked grandchildren included;
+- a port broker: `{ports.<name>}` placeholders resolve to free ports at
+  launch and are injected into commands, environments and readiness probes;
+- per-service restart policy (bounded restarts + backoff; exhaustion fails
+  the instance loudly with the log tail) and *gates* — external condition
+  probes (credentials, VPN) that park a crashing service in `blocked` without
+  burning restart budget, reviving it when the condition clears;
+- a registry: `jetty-orc ls` shows every instance with health, ports, process
+  count and memory/CPU; `status` breaks a stack down per service.
+
+```sh
+.venv/bin/jetty-orc doctor                              # what this host offers
+.venv/bin/jetty-orc check -c orchestrator.example.toml  # validate, spawn nothing
+.venv/bin/jetty-orc up -c orchestrator.example.toml     # run in the foreground
+.venv/bin/jetty-orc ls                                  # from anywhere
+```
+
+See [`docs/orchestrator.md`](docs/orchestrator.md) for full docs (config reference,
+lifecycle and exit classification, containment levels, registry,
+troubleshooting) and `orchestrator.example.toml` for a worked config.
 
 ## Design in one page
 

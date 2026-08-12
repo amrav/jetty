@@ -1,0 +1,63 @@
+# Example jetty-orc instance: a three-service stack with brokered ports,
+# readiness-ordered startup, bounded restarts and a credentials gate.
+#
+#   jetty-orc check -c orchestrator.example.toml    # validate only
+#   jetty-orc up    -c orchestrator.example.toml    # run in the foreground
+#   jetty-orc ls / status <name> / kill <name>      # from another terminal
+#
+# Placeholders available everywhere (cmd, env, cwd, probes, gate argv):
+#   {ports.<name>}    a port allocated (or verified) at launch
+#   {instance.name}   this instance's name
+#   {state_dir}       per-instance state directory (put databases here)
+#   {logs_dir}        per-instance log directory
+
+[instance]
+name = "dev"
+# auto: owned cgroup > systemd-run --user scope (re-exec) > process groups.
+containment = "auto"
+
+[ports]
+api = "auto"          # kernel-assigned free port
+backend = "9000-9020" # first free port in the range; none free = refuse to start
+web = "5173+"         # prefer 5173; occupied -> 5174, 5175, ...
+                      # an integer pins one exactly; occupied = refuse to start
+
+# A gate is an external condition probed by a command (exit 0 = satisfied).
+# A service that `requires` it and dies while it fails is parked in `blocked`
+# — no restart budget spent — and revived when the gate passes again.
+[gates.creds]
+check = ["my-auth-tool", "status", "--quiet"]
+recheck_seconds = 30
+
+[services.backend]
+cmd = ["python", "-m", "my_backend", "--port", "{ports.backend}"]
+cwd = "/path/to/backend"
+requires = ["creds"]
+env = { BACKEND_PORT = "{ports.backend}" }
+[services.backend.ready]
+http = "http://127.0.0.1:{ports.backend}/healthz"
+
+[services.api]
+cmd = ["python", "-m", "uvicorn", "app.main:app", "--port", "{ports.api}"]
+cwd = "/path/to/server"
+after = ["backend"]                 # start once `backend` is ready
+[services.api.env]
+BACKEND_URL = "http://127.0.0.1:{ports.backend}"
+DB_PATH = "{state_dir}/app.sqlite"  # state namespaced per instance
+[services.api.ready]
+http = "http://127.0.0.1:{ports.api}/healthz"
+[services.api.restart]
+max_restarts = 3                    # within window_seconds, then the whole
+window_seconds = 60                 # instance fails with the log tail attached
+no_restart_exit = [2]               # "config bug" exits are never retried
+[services.api.stop]
+signal = "TERM"
+grace_seconds = 10                  # then SIGKILL to the whole group
+
+[services.web]
+cmd = ["npm", "run", "dev"]
+cwd = "/path/to/web"
+after = ["api"]
+env = { WEB_PORT = "{ports.web}", API_PORT = "{ports.api}" }
+[services.web.ready]
+http = "http://127.0.0.1:{ports.web}/"
