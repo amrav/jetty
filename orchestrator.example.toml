@@ -8,6 +8,7 @@
 # Placeholders available everywhere (cmd, env, cwd, probes, gate argv):
 #   {ports.<name>}    a port allocated (or verified) at launch
 #   {instance.name}   this instance's name
+#   {home}            the current user's home directory
 #   {state_dir}       per-instance state directory (put databases here)
 #   {logs_dir}        this run's log directory (~/.jetty/logs/<name>-<timestamp>)
 

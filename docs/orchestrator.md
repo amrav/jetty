@@ -110,9 +110,14 @@ This applies to command paths (`cmd[0]`, gate `check[0]`, resolver `cmd[0]`
 — a bare name like `python` is a PATH lookup and passes through), to
 `ready.path`, and to `cwd`.
 
+`~` and `~user` expand and count as absolute — like an absolute path, they
+name a location deliberately. `{home}` is also available as a placeholder
+wherever placeholders render (env values included, which get no `~`
+treatment).
+
 Each service's runtime directory is its `cwd`: relative → config-relative
-and confined as above; absolute → anywhere; unset → the config file's own
-directory.
+and confined as above; absolute (including `~`, e.g. `cwd = "~"`) →
+anywhere; unset → the config file's own directory.
 
 ### Environment
 

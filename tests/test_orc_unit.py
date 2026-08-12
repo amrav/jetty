@@ -161,6 +161,22 @@ class ConfigPathTest(absltest.TestCase):
         with self.assertRaisesRegex(RenderError, "outside the config"):
             resolve_config_path("../sibling/run.sh", self.base, "cmd")
 
+    def test_tilde_expands_and_counts_as_absolute(self):
+        from jetty.orchestrator.render import resolve_config_path
+
+        home = os.path.expanduser("~")
+        self.assertEqual(resolve_config_path("~", self.base, "cwd"), home)
+        self.assertEqual(
+            resolve_config_path("~/work", self.base, "cwd"),
+            os.path.join(home, "work"),
+        )
+
+    def test_home_placeholder(self):
+        ctx = build_context("dev", {}, "/s", "/l")
+        self.assertEqual(
+            render_str("{home}/x", ctx), os.path.expanduser("~") + "/x"
+        )
+
     def test_bare_command_names_are_path_lookups(self):
         from jetty.orchestrator.render import resolve_command
 

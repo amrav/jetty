@@ -44,6 +44,7 @@ def build_context(
         "instance.name": instance_name,
         "state_dir": state_dir,
         "logs_dir": logs_dir,
+        "home": os.path.expanduser("~"),
     }
     for name, port in ports.items():
         ctx[f"ports.{name}"] = str(port)
@@ -73,7 +74,14 @@ def resolve_config_path(value: str, config_dir: str, what: str) -> str:
 
     realpath on both sides, so a symlink inside the tree pointing out of it
     counts as outside.
+
+    `~` and `~user` expand first and count as absolute — like an absolute
+    path, they name a location deliberately, not relative to the config.
     """
+    if value.startswith("~"):
+        expanded = os.path.expanduser(value)
+        if os.path.isabs(expanded):  # an unknown ~user stays as it was
+            value = expanded
     if os.path.isabs(value):
         return value
     base = os.path.realpath(config_dir)
