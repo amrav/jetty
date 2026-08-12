@@ -329,6 +329,78 @@ cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
         proc.send_signal(signal.SIGINT)
         proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
 
+    def test_resolver_switches_binary_on_restart(self):
+        """The release-deploy story: the resolver points at v2, the running v1
+        process is untouched, and the next respawn comes up on v2."""
+        for version in ("v1", "v2"):
+            path = os.path.join(self.workdir.full_path, f"app-{version}")
+            with open(path, "w") as f:
+                f.write(
+                    f"#!{sys.executable}\nimport pathlib, time\n"
+                    f"pathlib.Path('ran-{version}').touch()\ntime.sleep(300)\n"
+                )
+            os.chmod(path, 0o755)
+        self.workdir.create_file("target.txt", content=f"{self.workdir.full_path}/app-v1\n")
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["cat", "target.txt"]
+cache_seconds = 0.0
+
+[services.app]
+cmd = ["{{bin.app}}"]
+[services.app.restart]
+backoff_initial_seconds = 0.05
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: os.path.exists("ran-v1"), proc, what="v1 running"
+        )
+        record = self.record()
+        self.assertEqual(
+            record["resolvers"]["app"]["binaries"]["app"],
+            f"{self.workdir.full_path}/app-v1",
+        )
+        with open("target.txt", "w") as f:  # the release moves
+            f.write(f"{self.workdir.full_path}/app-v2\n")
+        v1_pid = record["services"]["app"]["pid"]
+        os.kill(v1_pid, signal.SIGKILL)
+        self.wait_until(
+            lambda: os.path.exists("ran-v2"), proc, what="v2 after restart"
+        )
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
+    def test_resolver_failure_is_a_spawn_failure_with_stderr(self):
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["sh", "-c", "echo release feed is down >&2; exit 3"]
+cache_seconds = 0.0
+
+[services.app]
+cmd = ["{{bin.app}}"]
+[services.app.restart]
+max_restarts = 1
+backoff_initial_seconds = 0.05
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        rc = proc.wait(timeout=30)
+        output = self.output_of(proc)
+        self.assertEqual(rc, 1, output)
+        self.assertIn("resolver 'app' exited 3", output)
+        self.assertIn("release feed is down", output)
+
     def test_ls_status_and_kill(self):
         config = self.write_config(
             f"""

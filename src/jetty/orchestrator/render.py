@@ -92,10 +92,16 @@ def validate_templates(config: OrchestratorConfig) -> None:
         state_dir="/dev/null",
         logs_dir="/dev/null",
     )
+    for resolver in config.resolvers.values():
+        for provided in resolver.provides:
+            ctx[f"bin.{provided}"] = "/dev/null"
     try:
         for svc in config.services.values():
             render_service(svc, ctx)
         for gate in config.gates.values():
             render_gate_argv(gate, ctx)
+        for resolver in config.resolvers.values():
+            for arg in resolver.cmd:
+                render_str(arg, ctx)
     except RenderError as e:
         raise ValueError(str(e)) from None

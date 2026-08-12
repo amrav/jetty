@@ -26,10 +26,13 @@ import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 
+from collections.abc import Awaitable
+
 from .config import ServiceConfig
 from .containment import Containment
 from .gates import GateSet
 from .render import RenderedService
+from .resolvers import ResolveError
 
 _TAIL_BYTES = 8192
 _PROBE_ATTEMPT_TIMEOUT = 2.0
@@ -40,7 +43,7 @@ class Service:
         self,
         name: str,
         cfg: ServiceConfig,
-        rendered: RenderedService,
+        render: Callable[[], Awaitable[RenderedService]],
         containment: Containment,
         gates: GateSet,
         log_path: Path,
@@ -59,7 +62,10 @@ class Service:
         self.ready_event = asyncio.Event()
 
         self._cfg = cfg
-        self._rendered = rendered
+        #: Called before every spawn: placeholders like {bin.<name>} resolve
+        #: to whatever the release is NOW, so a restart picks up a new binary.
+        self._render = render
+        self._rendered: RenderedService | None = None
         self._containment = containment
         self._gates = gates
         self._dep_events = dep_events
@@ -210,6 +216,14 @@ class Service:
     async def _spawn(self) -> str | None:
         self._set_state("starting")
         self._logf = open(self.log_path, "ab", buffering=0)
+        try:
+            self._rendered = await self._render()
+        except ResolveError as e:
+            msg = f"binary resolution failed: {e}"
+            self._log_note(msg)
+            self._logf.close()
+            self._logf = None
+            return msg
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         self._append_output(
             f"=== jetty-orc spawn {stamp} :: {' '.join(self._rendered.cmd)}\n".encode()
@@ -276,6 +290,7 @@ class Service:
 
     async def _wait_ready(self) -> bool:
         r = self._rendered
+        assert r is not None  # set by the _spawn that preceded us
         if r.ready_http is None and r.ready_tcp is None and r.ready_path is None:
             return True
         assert self.proc is not None

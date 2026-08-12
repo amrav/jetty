@@ -77,6 +77,9 @@ supervises a named *instance* of a multi-process stack, Linux only:
   kill` take down the whole tree, double-forked grandchildren included;
 - a port broker: `{ports.<name>}` placeholders resolve to free ports at
   launch and are injected into commands, environments and readiness probes;
+- binary resolvers: a script names the current binary path(s) — several may
+  be pinned together atomically — and `{bin.<name>}` re-resolves before each
+  spawn, so a restart picks up a new release without config edits;
 - per-service restart policy (bounded restarts + backoff; exhaustion fails
   the instance loudly with the log tail) and *gates* — external condition
   probes (credentials, VPN) that park a crashing service in `blocked` without

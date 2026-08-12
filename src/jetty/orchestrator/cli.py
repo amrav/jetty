@@ -255,6 +255,12 @@ def _cmd_status(args: argparse.Namespace) -> None:
         if svc.get("blocked_on"):
             line += f" blocked_on {','.join(svc['blocked_on'])}"
         print(line)
+    resolvers = record.get("resolvers") or {}
+    if resolvers:
+        print("binaries:")
+        for rname, st in resolvers.items():
+            for bname, path in st.get("binaries", {}).items():
+                print(f"  {bname:<20} {path}  (via {rname})")
     print(f"logs:        {record.get('state_dir')}/logs/<service>.log")
 
 

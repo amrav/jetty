@@ -20,12 +20,13 @@ import time
 from pathlib import Path
 
 from . import procfs
-from .config import OrchestratorConfig, start_order
+from .config import OrchestratorConfig, service_bin_refs, start_order
 from .containment import Containment
 from .gates import GateSet
 from .ports import PortError, allocate_ports
 from .registry import Registry
-from .render import build_context, render_gate_argv, render_service
+from .render import RenderedService, build_context, render_gate_argv, render_service, render_str
+from .resolvers import Resolvers
 from .service import Service
 
 
@@ -67,6 +68,7 @@ class Supervisor:
         self._failure: str | None = None
         self._created = 0.0
         self._registry: Registry | None = None
+        self._resolvers: Resolvers | None = None
         self._state = "starting"
 
     async def run(self) -> int:
@@ -88,6 +90,10 @@ class Supervisor:
         gates = GateSet(
             {n: (g, render_gate_argv(g, ctx)) for n, g in cfg.gates.items()}
         )
+        self._resolvers = Resolvers(
+            cfg.resolvers,
+            {n: [render_str(a, ctx) for a in r.cmd] for n, r in cfg.resolvers.items()},
+        )
         self._containment.setup(list(cfg.services))
 
         shutdown = asyncio.Event()
@@ -101,12 +107,20 @@ class Supervisor:
             self._write_record()
 
         extra_env = service_extra_env(name, self._containment)
+
+        def renderer(svc_cfg, bins: set[str]):
+            async def render() -> RenderedService:
+                bin_ctx = await self._resolvers.context_for(bins) if bins else {}
+                return render_service(svc_cfg, {**ctx, **bin_ctx})
+
+            return render
+
         for sname in start_order(cfg.services):
             svc_cfg = cfg.services[sname]
             self._services[sname] = Service(
                 sname,
                 svc_cfg,
-                render_service(svc_cfg, ctx),
+                renderer(svc_cfg, service_bin_refs(svc_cfg)),
                 self._containment,
                 gates,
                 logs_dir / f"{sname}.log",
@@ -213,5 +227,6 @@ class Supervisor:
                 "state_dir": str(self._root / "instances" / self._config.instance.name),
                 "state": state,
                 "services": {n: s.status() for n, s in self._services.items()},
+                "resolvers": self._resolvers.state if self._resolvers else {},
             }
         )

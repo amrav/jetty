@@ -9,6 +9,7 @@ config that can at least be *attempted*.
 from __future__ import annotations
 
 import re
+import string
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -39,6 +40,37 @@ class GateConfig(Strict):
     check: list[str] = Field(min_length=1)
     recheck_seconds: float = Field(default=15.0, gt=0)
     timeout_seconds: float = Field(default=20.0, gt=0)
+
+
+class ResolverConfig(Strict):
+    """A script that maps names to binary paths, so "which binary" can change
+    between releases without editing the config.
+
+    `cmd` is run in the supervisor's working directory; exit 0 with the paths
+    on stdout. A resolver providing ONE name may print just the path; one
+    providing SEVERAL prints `name=path` lines (any order — order-dependence
+    would let a reordered echo silently swap binaries). Names bound by one
+    invocation are pinned together: they always come from the same run of the
+    script, so a release manifest can never be read half-old, half-new.
+
+    Services reference the results as `{bin.<name>}` anywhere a placeholder
+    renders. A resolver failure (non-zero exit, timeout, malformed output, a
+    path that does not exist) is a spawn failure of the service that needed
+    it — the ordinary restart budget and backoff apply, which is exactly the
+    right behaviour while a release is mid-publish.
+    """
+
+    cmd: list[str] = Field(min_length=1)
+    #: Names this resolver binds. Empty = the resolver's own name.
+    provides: list[str] = Field(default_factory=list)
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    #: "spawn": re-run before a service (re)spawn, so a restart picks up a
+    #: new release — running processes are never touched. "instance": resolve
+    #: once at startup and pin for the instance's whole life.
+    refresh: Literal["spawn", "instance"] = "spawn"
+    #: One resolution is shared by every spawn within this window, so pinned
+    #: services starting together cannot straddle a release.
+    cache_seconds: float = Field(default=5.0, ge=0)
 
 
 class ReadyConfig(Strict):
@@ -121,6 +153,7 @@ class OrchestratorConfig(Strict):
     #:   "8000-8020" — same, bounded: error if the whole range is taken
     ports: dict[str, int | str] = Field(default_factory=dict)
     gates: dict[str, GateConfig] = Field(default_factory=dict)
+    resolvers: dict[str, ResolverConfig] = Field(default_factory=dict)
     services: dict[str, ServiceConfig] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -128,11 +161,47 @@ class OrchestratorConfig(Strict):
         for kind, names in (
             ("ports", self.ports),
             ("gates", self.gates),
+            ("resolvers", self.resolvers),
             ("services", self.services),
         ):
             for name in names:
                 if not _NAME_RE.match(name):
                     raise ValueError(f"{kind} key {name!r} must match {_NAME_RE.pattern}")
+
+        provided: dict[str, str] = {}  # bin name -> resolver name
+        for rname, resolver in self.resolvers.items():
+            if not resolver.provides:
+                resolver.provides = [rname]
+            for bin_name in resolver.provides:
+                if not _NAME_RE.match(bin_name):
+                    raise ValueError(
+                        f"resolvers.{rname} provides {bin_name!r}, which must "
+                        f"match {_NAME_RE.pattern}"
+                    )
+                if bin_name in provided:
+                    raise ValueError(
+                        f"binary {bin_name!r} is provided by both resolvers "
+                        f"{provided[bin_name]!r} and {rname!r}"
+                    )
+                provided[bin_name] = rname
+            if bin_refs(resolver.cmd):
+                raise ValueError(
+                    f"resolvers.{rname}: a resolver's own cmd cannot use "
+                    "{bin.*} placeholders"
+                )
+        for gname, gate in self.gates.items():
+            if bin_refs(gate.check):
+                raise ValueError(
+                    f"gates.{gname}: gate commands cannot use {{bin.*}} "
+                    "placeholders (gates run before binaries are resolved)"
+                )
+        for sname, svc in self.services.items():
+            for bin_name in sorted(service_bin_refs(svc)):
+                if bin_name not in provided:
+                    raise ValueError(
+                        f"service {sname!r} references {{bin.{bin_name}}} but "
+                        "no resolver provides it"
+                    )
 
         fixed: dict[int, str] = {}
         for name, want in self.ports.items():
@@ -170,6 +239,32 @@ class OrchestratorConfig(Strict):
     def load(path: str | Path) -> "OrchestratorConfig":
         raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
         return OrchestratorConfig.model_validate(raw)
+
+
+def bin_refs(strings: list[str]) -> set[str]:
+    """The `{bin.<name>}` placeholders appearing in `strings`."""
+    names: set[str] = set()
+    for s in strings:
+        try:
+            fields = [f for _, f, _, _ in string.Formatter().parse(s) if f]
+        except ValueError:
+            continue  # malformed template; render_str reports it properly
+        names.update(f[4:] for f in fields if f.startswith("bin."))
+    return names
+
+
+def service_bin_refs(svc: ServiceConfig) -> set[str]:
+    """Every binary name a service's templates depend on."""
+    return bin_refs(
+        [
+            *svc.cmd,
+            *svc.env.values(),
+            svc.cwd or "",
+            svc.ready.http or "",
+            svc.ready.tcp or "",
+            svc.ready.path or "",
+        ]
+    )
 
 
 def parse_port_spec(want: int | str) -> tuple[int, int] | Literal["auto"] | None:

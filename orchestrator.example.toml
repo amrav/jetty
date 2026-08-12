@@ -22,6 +22,15 @@ backend = "9000-9020" # first free port in the range; none free = refuse to star
 web = "5173+"         # prefer 5173; occupied -> 5174, 5175, ...
                       # an integer pins one exactly; occupied = refuse to start
 
+# A resolver maps names to binary paths at spawn time, so a new release is
+# picked up by whichever service next (re)spawns. One script may pin several
+# binaries together: it then prints "name=path" lines (one invocation binds
+# them all, so they can never be read half-old, half-new). A single-name
+# resolver just prints the path. Reference results as {bin.<name>}.
+#[resolvers.release]
+#cmd = ["infra/latest-release.sh"]
+#provides = ["backend_bin", "harness_bin"]
+
 # A gate is an external condition probed by a command (exit 0 = satisfied).
 # A service that `requires` it and dies while it fails is parked in `blocked`
 # — no restart budget spent — and revived when the gate passes again.

@@ -191,6 +191,62 @@ class PortsTest(absltest.TestCase):
         return holder.getsockname()[1]
 
 
+class ResolverConfigTest(absltest.TestCase):
+    def test_provides_defaults_to_resolver_name(self):
+        cfg = config_from(
+            '[resolvers.mybin]\ncmd = ["true"]\n'
+            + MINIMAL.replace('["true"]', '["{bin.mybin}"]')
+        )
+        self.assertEqual(cfg.resolvers["mybin"].provides, ["mybin"])
+
+    def test_unresolved_bin_reference_rejected(self):
+        with self.assertRaisesRegex(Exception, "no resolver provides"):
+            config_from(MINIMAL.replace('["true"]', '["{bin.ghost}"]'))
+
+    def test_duplicate_provides_rejected(self):
+        with self.assertRaisesRegex(Exception, "provided by both"):
+            config_from(
+                '[resolvers.a]\ncmd = ["true"]\nprovides = ["x"]\n'
+                '[resolvers.b]\ncmd = ["true"]\nprovides = ["x"]\n' + MINIMAL
+            )
+
+    def test_gate_cannot_use_bin_placeholders(self):
+        with self.assertRaisesRegex(Exception, "gate commands cannot"):
+            config_from(
+                '[resolvers.x]\ncmd = ["true"]\n'
+                '[gates.g]\ncheck = ["{bin.x}"]\n' + MINIMAL
+            )
+
+
+class ResolverOutputTest(absltest.TestCase):
+    def parse(self, provides, stdout):
+        from jetty.orchestrator.resolvers import parse_output
+
+        return parse_output("rel", provides, stdout)
+
+    def test_single_name_bare_path(self):
+        self.assertEqual(self.parse(["app"], "/opt/app-v2\n"), {"app": "/opt/app-v2"})
+
+    def test_key_value_lines_any_order_with_comments(self):
+        got = self.parse(
+            ["cp", "harness"],
+            "# release 2026-08-12\nharness=/opt/h\n\ncp=/opt/cp\n",
+        )
+        self.assertEqual(got, {"cp": "/opt/cp", "harness": "/opt/h"})
+
+    def test_unknown_repeated_and_missing_names_rejected(self):
+        from jetty.orchestrator.resolvers import ResolveError
+
+        with self.assertRaisesRegex(ResolveError, "unknown name"):
+            self.parse(["a"], "b=/x\n")
+        with self.assertRaisesRegex(ResolveError, "twice"):
+            self.parse(["a"], "a=/x\na=/y\n")
+        with self.assertRaisesRegex(ResolveError, "did not return"):
+            self.parse(["a", "b"], "a=/x\n")
+        with self.assertRaisesRegex(ResolveError, "unparseable"):
+            self.parse(["a", "b"], "/just/a/path\n")
+
+
 class ServiceEnvTest(absltest.TestCase):
     def test_cgroup_root_exported_only_under_cgroup_containment(self):
         from jetty.orchestrator.containment import CgroupBackend, PgroupBackend

@@ -144,6 +144,51 @@ Logs: `<state_dir>/logs/<service>.log`, append-only, stdout+stderr merged,
 with orchestrator annotations (spawn headers, restart/gate notes) inline.
 The last ~8 KiB travels with failure reports.
 
+## Dynamic binaries (resolvers)
+
+When "which binary" changes between releases, don't hardcode paths — declare
+a resolver: a script whose stdout names the current path(s), run by the
+supervisor before a spawn that needs it.
+
+```toml
+[resolvers.release]
+cmd = ["infra/latest-release.sh"]        # runs in the supervisor's cwd
+provides = ["control_plane", "harness"]  # names bound by ONE invocation
+timeout_seconds = 30.0
+refresh = "spawn"        # default: re-run before each (re)spawn
+                         # "instance": resolve once, pinned for the whole run
+cache_seconds = 5.0      # one resolution shared across a spawn wave
+
+[services.api]
+cmd = ["{bin.control_plane}", "--port", "{ports.api}"]
+env = { HARNESS_BIN = "{bin.harness}" }
+```
+
+Output contract: a resolver providing **one** name (`provides` defaults to
+the resolver's own name) may print just the path; one providing **several**
+prints `name=path` lines, any order, `#` comments and blank lines ignored.
+Unknown, repeated or missing names, relative paths, and paths that don't
+exist are all errors — order never carries meaning, so a reordered echo
+can't silently swap two binaries.
+
+Semantics worth relying on:
+
+- **Pinning**: every name a resolver provides comes from one invocation,
+  atomically; services spawning within `cache_seconds` of each other share
+  that invocation. A manifest read mid-release cannot hand the control plane
+  one version and its harness another.
+- **Releases apply on respawn, never mid-flight**: a running process is
+  never touched; whichever service next crashes, is killed, or restarts
+  comes back on the new release. (`kill` + `up`, or killing one service's
+  pid, is therefore a deploy.)
+- **Resolver failure = spawn failure** of the service that asked: the
+  ordinary restart budget and backoff apply, the script's stderr lands in
+  the service log and any instance-failure report. A release that's
+  mid-publish looks like a briefly crashing service, not a wedged one.
+
+`jetty-orc status <name>` shows each resolved binary and which resolver
+produced it.
+
 ## Containment
 
 The guarantee sought: every process a service starts can be enumerated,
