@@ -274,7 +274,7 @@ class Resolvers:
                     f"resolver {rname!r} returned {bin_name}={path!r}, which is "
                     "not an absolute path (services run from their own cwd)"
                 )
-        if cfg.copy:
+        if cfg.copy_binaries:
             # Copies can be large and the source remote — off the event loop.
             # No existence pre-check here: a vanished source with a cached
             # copy is exactly the case `copy` exists for.

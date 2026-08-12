@@ -75,8 +75,9 @@ class ResolverConfig(Strict):
     #: mounts that can disappear (a respawn happens exactly when the mount is
     #: gone). Copies are cached by source path (+ size/mtime), reused as a
     #: fallback when the source is unreachable, and cleaned up once unused
-    #: for `copy_keep_days`.
-    copy: bool = False
+    #: for `copy_keep_days`. (Config key `copy`; the attribute is aliased
+    #: because pydantic's BaseModel already has a .copy() method.)
+    copy_binaries: bool = Field(default=False, alias="copy")
     copy_keep_days: float = Field(default=7.0, gt=0)
     #: Gates this resolver depends on (e.g. the release feed needs valid
     #: credentials). Every service using one of this resolver's binaries
