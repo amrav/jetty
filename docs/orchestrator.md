@@ -201,6 +201,37 @@ Semantics worth relying on:
 `jetty-orc status <name>` shows each resolved binary and which resolver
 produced it.
 
+### Copying off unreliable mounts
+
+If the resolved path lives somewhere that can disappear (a network mount, a
+release dir that gets rotated), set `copy = true` on the resolver: binaries
+are copied into `~/.jetty/bin/` (`$JETTY_ORC_BIN_ROOT` overrides) and
+services run the copy.
+
+```toml
+[resolvers.release]
+cmd = ["infra/latest-release.sh"]
+provides = ["control_plane", "harness"]
+copy = true
+copy_keep_days = 7.0
+```
+
+- **Cached by source path**: the copy's name is the source's basename plus a
+  hash of its path, and a `.src` sidecar records the source's size + mtime —
+  an unchanged source is never re-copied; a changed one is re-copied
+  atomically (tmp + rename, so a running process's binary is never written
+  into).
+- **Vanish-resilient**: if the source can't even be stat'd but a copy
+  exists, the copy is used (with a warning) — a mount disappears precisely
+  when the respawn needs the binary. No copy either → the usual
+  resolver-failure path.
+- **Cleanup**: every use touches the copy, and copies (plus sidecars, plus
+  orphaned partial copies) unused for `copy_keep_days` (default 7) are
+  deleted on the next resolution — binaries in active rotation never
+  expire; last month's releases do.
+
+`status` shows both the local path and the source it was copied from.
+
 ## Containment
 
 The guarantee sought: every process a service starts can be enumerated,

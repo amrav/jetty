@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -245,6 +246,81 @@ class ResolverOutputTest(absltest.TestCase):
             self.parse(["a", "b"], "a=/x\n")
         with self.assertRaisesRegex(ResolveError, "unparseable"):
             self.parse(["a", "b"], "/just/a/path\n")
+
+
+class MaterializeTest(absltest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.create_tempdir("binroot").full_path)
+        self.srcdir = Path(self.create_tempdir("src").full_path)
+
+    def _source(self, name="app", content="v1") -> str:
+        path = self.srcdir / name
+        path.write_text(content)
+        os.chmod(path, 0o755)
+        return str(path)
+
+    def materialize(self, source, keep_days=7.0) -> str:
+        from jetty.orchestrator.resolvers import materialize
+
+        return materialize(source, self.root, keep_days)
+
+    def test_copies_once_and_caches_by_path(self):
+        source = self._source()
+        dest = self.materialize(source)
+        self.assertTrue(dest.startswith(str(self.root)))
+        self.assertEqual(Path(dest).read_text(), "v1")
+        # Prove the second call is a cache hit: corrupt the copy; an
+        # unchanged source must not overwrite it.
+        Path(dest).write_text("sentinel")
+        self.assertEqual(self.materialize(source), dest)
+        self.assertEqual(Path(dest).read_text(), "sentinel")
+
+    def test_changed_source_is_recopied_to_the_same_name(self):
+        source = self._source(content="v1")
+        dest = self.materialize(source)
+        src = Path(source)
+        src.write_text("v2-longer")  # size and mtime both move
+        self.assertEqual(self.materialize(source), dest)
+        self.assertEqual(Path(dest).read_text(), "v2-longer")
+
+    def test_vanished_source_falls_back_to_the_copy(self):
+        from jetty.orchestrator.resolvers import ResolveError
+
+        source = self._source()
+        dest = self.materialize(source)
+        os.unlink(source)
+        self.assertEqual(self.materialize(source), dest)
+        self.assertEqual(Path(dest).read_text(), "v1")
+        # ...but no copy and no source is a hard failure.
+        gone = str(self.srcdir / "never-existed")
+        with self.assertRaisesRegex(ResolveError, "no cached copy"):
+            self.materialize(gone)
+
+    def test_distinct_sources_never_collide(self):
+        a = self._source("app")
+        b = str(self.srcdir / "sub")
+        os.mkdir(b)
+        b_app = Path(b) / "app"  # same basename, different path
+        b_app.write_text("other")
+        self.assertNotEqual(self.materialize(a), self.materialize(str(b_app)))
+
+    def test_unused_copies_expire_and_used_ones_do_not(self):
+        old = self.materialize(self._source("old"))
+        ancient = time.time() - 8 * 86400
+        for suffix in ("", ".src"):
+            os.utime(old + suffix, (ancient, ancient))
+        kept = self.materialize(self._source("kept"))
+        # Any later materialize prunes; `kept` was just touched and survives.
+        self.materialize(self._source("kept"))
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(kept))
+
+    def test_directory_source_rejected(self):
+        from jetty.orchestrator.resolvers import ResolveError
+
+        with self.assertRaisesRegex(ResolveError, "regular file"):
+            self.materialize(str(self.srcdir))
 
 
 class ServiceEnvTest(absltest.TestCase):

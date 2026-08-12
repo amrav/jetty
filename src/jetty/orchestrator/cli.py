@@ -259,8 +259,12 @@ def _cmd_status(args: argparse.Namespace) -> None:
     if resolvers:
         print("binaries:")
         for rname, st in resolvers.items():
+            copied_from = st.get("copied_from", {})
             for bname, path in st.get("binaries", {}).items():
-                print(f"  {bname:<20} {path}  (via {rname})")
+                line = f"  {bname:<20} {path}  (via {rname}"
+                if bname in copied_from:
+                    line += f", copied from {copied_from[bname]}"
+                print(line + ")")
     print(f"logs:        {record.get('logs_dir')}/<service>.log")
 
 

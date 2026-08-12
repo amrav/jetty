@@ -23,17 +23,111 @@ backoff apply while a release is mid-publish.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import shutil
+import stat as stat_mod
+import sys
 import time
+from pathlib import Path
 
 from .config import ResolverConfig
 
 _OUTPUT_LIMIT = 1 << 20  # a resolver that prints a megabyte is broken
 _STDERR_TAIL = 2000
+_META_SUFFIX = ".src"  # sidecar recording the source's (size, mtime_ns)
+_TMP_MAX_AGE = 3600  # a .tmp- older than this is a crashed copy, not a live one
 
 
 class ResolveError(RuntimeError):
     pass
+
+
+def bin_root() -> Path:
+    env = os.environ.get("JETTY_ORC_BIN_ROOT")
+    return Path(env) if env else Path.home() / ".jetty" / "bin"
+
+
+def materialize(source: str, root: Path, keep_days: float) -> str:
+    """Copy `source` into `root`, cached and vanish-resilient.
+
+    The destination name is derived from the source PATH (basename plus a
+    path hash), so the same source never collides with a different one and
+    never re-copies while unchanged: a `.src` sidecar records the source's
+    (size, mtime_ns), and a matching source is a cache hit. A changed source
+    is re-copied via tmp + rename — atomic, and it never writes into a file
+    some running process is executing (that would be ETXTBSY; replacing the
+    directory entry is not).
+
+    If the source cannot even be stat'd but a copy exists, the copy is used:
+    that IS the feature — a network mount disappears precisely when the
+    respawn needs the binary.
+
+    Aging: every use touches the copy's mtime, and `_prune` removes pairs
+    unused for `keep_days` — so a binary in active rotation never expires,
+    and last month's releases do.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    _prune(root, keep_days)
+    digest = hashlib.sha256(source.encode()).hexdigest()[:16]
+    dest = root / f"{os.path.basename(source)}-{digest}"
+    meta = Path(str(dest) + _META_SUFFIX)
+    try:
+        src_stat = os.stat(source)
+    except OSError as e:
+        if dest.exists():
+            print(
+                f"jetty-orc: warning: {source} is unreachable ({e.strerror}); "
+                f"using cached copy {dest}",
+                file=sys.stderr,
+            )
+            _touch(dest, meta)
+            return str(dest)
+        raise ResolveError(
+            f"{source} is unreachable ({e.strerror}) and no cached copy exists"
+        ) from None
+    if not stat_mod.S_ISREG(src_stat.st_mode):
+        raise ResolveError(f"copy = true needs a regular file; {source} is not one")
+    fingerprint = f"{src_stat.st_size} {src_stat.st_mtime_ns}"
+    try:
+        if dest.exists() and meta.read_text() == fingerprint:
+            _touch(dest, meta)
+            return str(dest)
+    except OSError:
+        pass  # missing/unreadable sidecar: fall through to a fresh copy
+    tmp = root / f".tmp-{os.getpid()}-{digest}"
+    shutil.copy2(source, tmp)
+    os.replace(tmp, dest)
+    meta.write_text(fingerprint)
+    _touch(dest, meta)
+    return str(dest)
+
+
+def _touch(dest: Path, meta: Path) -> None:
+    for path in (dest, meta):
+        try:
+            os.utime(path)
+        except OSError:
+            pass
+
+
+def _prune(root: Path, keep_days: float) -> None:
+    now = time.time()
+    for entry in root.iterdir():
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        stale = (
+            age > _TMP_MAX_AGE
+            if entry.name.startswith(".tmp-")
+            else age > keep_days * 86400
+        )
+        if stale:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
 
 
 def parse_output(name: str, provides: list[str], stdout: str) -> dict[str, str]:
@@ -119,14 +213,19 @@ class Resolvers:
                 age = time.monotonic() - cached[0]
                 if cfg.refresh == "instance" or age < cfg.cache_seconds:
                     return cached[1]
-            binaries = await self._run(rname, cfg)
+            binaries, sources = await self._run(rname, cfg)
             if cached is None or cached[1] != binaries:
                 self.generation[rname] = self.generation.get(rname, 0) + 1
             self._cache[rname] = (time.monotonic(), binaries)
             self.state[rname] = {"binaries": binaries, "resolved_at": time.time()}
+            if sources is not None:
+                self.state[rname]["copied_from"] = sources
             return binaries
 
-    async def _run(self, rname: str, cfg: ResolverConfig) -> dict[str, str]:
+    async def _run(
+        self, rname: str, cfg: ResolverConfig
+    ) -> tuple[dict[str, str], dict[str, str] | None]:
+        """(binaries to use, their sources if `copy` rewrote them)."""
         argv = self._argvs[rname]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -162,9 +261,32 @@ class Resolvers:
                     f"resolver {rname!r} returned {bin_name}={path!r}, which is "
                     "not an absolute path (services run from their own cwd)"
                 )
+        if cfg.copy:
+            # Copies can be large and the source remote — off the event loop.
+            # No existence pre-check here: a vanished source with a cached
+            # copy is exactly the case `copy` exists for.
+            local = await asyncio.to_thread(self._copy_all, rname, binaries, cfg)
+            return local, binaries
+        for bin_name, path in binaries.items():
             if not os.path.exists(path):
                 raise ResolveError(
                     f"resolver {rname!r} returned {bin_name}={path}, which does "
                     "not exist"
                 )
-        return binaries
+        return binaries, None
+
+    @staticmethod
+    def _copy_all(
+        rname: str, binaries: dict[str, str], cfg: ResolverConfig
+    ) -> dict[str, str]:
+        local: dict[str, str] = {}
+        for bin_name, path in binaries.items():
+            try:
+                local[bin_name] = materialize(path, bin_root(), cfg.copy_keep_days)
+            except ResolveError as e:
+                raise ResolveError(f"resolver {rname!r}: {bin_name}: {e}") from None
+            except OSError as e:
+                raise ResolveError(
+                    f"resolver {rname!r}: copying {bin_name}={path} failed: {e}"
+                ) from None
+        return local

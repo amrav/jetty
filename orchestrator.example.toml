@@ -30,6 +30,8 @@ web = "5173+"         # prefer 5173; occupied -> 5174, 5175, ...
 #[resolvers.release]
 #cmd = ["infra/latest-release.sh"]
 #provides = ["backend_bin", "harness_bin"]
+#copy = true            # source on a mount that can vanish: run a local copy
+                        # from ~/.jetty/bin, cached by source path, kept 7 days
 
 # A gate is an external condition probed by a command (exit 0 = satisfied).
 # A service that `requires` it and dies while it fails is parked in `blocked`

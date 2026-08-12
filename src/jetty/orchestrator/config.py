@@ -71,6 +71,13 @@ class ResolverConfig(Strict):
     #: One resolution is shared by every spawn within this window, so pinned
     #: services starting together cannot straddle a release.
     cache_seconds: float = Field(default=5.0, ge=0)
+    #: Copy resolved binaries into ~/.jetty/bin before use — for sources on
+    #: mounts that can disappear (a respawn happens exactly when the mount is
+    #: gone). Copies are cached by source path (+ size/mtime), reused as a
+    #: fallback when the source is unreachable, and cleaned up once unused
+    #: for `copy_keep_days`.
+    copy: bool = False
+    copy_keep_days: float = Field(default=7.0, gt=0)
 
 
 class ReadyConfig(Strict):

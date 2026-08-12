@@ -63,6 +63,7 @@ class OrcE2ETest(absltest.TestCase):
             ),
             "JETTY_ORC_ROOT": os.path.join(self.workdir.full_path, "orcroot"),
             "JETTY_ORC_LOG_ROOT": os.path.join(self.workdir.full_path, "orclogs"),
+            "JETTY_ORC_BIN_ROOT": os.path.join(self.workdir.full_path, "orcbin"),
         }
 
     # -- harness --
@@ -467,6 +468,59 @@ backoff_initial_seconds = 0.05
             what="svc_b running again",
         )
         self.assertEqual(self.record()["services"]["svc_b"]["restarts"], 0)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
+    def test_copied_binary_survives_its_source_vanishing(self):
+        """copy = true: the service runs a local copy, and a respawn works
+        even after the source (the 'network mount') is gone."""
+        source = os.path.join(self.workdir.full_path, "mounted-app")
+        with open(source, "w") as f:
+            f.write(
+                f"#!{sys.executable}\nimport pathlib, time\n"
+                "with open('runs.txt', 'a') as fh: fh.write('run\\n')\n"
+                "time.sleep(300)\n"
+            )
+        os.chmod(source, 0o755)
+        self.workdir.create_file("target.txt", content=source + "\n")
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["cat", "target.txt"]
+copy = true
+cache_seconds = 0.0
+
+[services.app]
+cmd = ["{{bin.app}}"]
+[services.app.restart]
+backoff_initial_seconds = 0.05
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(lambda: os.path.exists("runs.txt"), proc, what="first run")
+        record = self.record()
+        local = record["resolvers"]["app"]["binaries"]["app"]
+        self.assertTrue(
+            local.startswith(self.env["JETTY_ORC_BIN_ROOT"]),
+            f"service should run the copy, got {local}",
+        )
+        self.assertEqual(record["resolvers"]["app"]["copied_from"]["app"], source)
+
+        def runs() -> int:
+            with open("runs.txt") as fh:
+                return len(fh.read().splitlines())
+
+        os.unlink(source)  # the mount disappears
+        os.kill(record["services"]["app"]["pid"], signal.SIGKILL)
+        self.wait_until(
+            lambda: runs() >= 2 and self.service_state("app") == "running",
+            proc,
+            what="respawn from the cached copy",
+        )
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
