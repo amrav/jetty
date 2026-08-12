@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 jetty = "jetty.cli:main"
+jetty-orc = "jetty.orchestrator.cli:main"
 
 [build-system]
 requires = ["hatchling"]

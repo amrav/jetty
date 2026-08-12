@@ -26,17 +26,22 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install
-        run: pip install -e '.[dev]'
+        # --locked: the lockfile is the contract; a pyproject edit without a
+        # committed re-lock fails here instead of silently floating versions.
+        run: uv sync --locked --extra dev
 
       - name: Validate the shipped example config
-        run: jetty --config jetty.example.toml --check
+        run: uv run jetty --config jetty.example.toml --check
 
       - name: Tests
-        run: python tests/run_all.py
+        run: uv run python tests/run_all.py
 
       - name: Tests, with a temp root outside /tmp
         # The suite must never assume a writable /tmp: absltest picks the temp
@@ -45,4 +50,4 @@ jobs:
         # on any test that reached for a hardcoded path.
         env:
           TEST_TMPDIR: ${{ runner.temp }}/jetty-tests
-        run: python tests/run_all.py
+        run: uv run python tests/run_all.py
