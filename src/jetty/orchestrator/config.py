@@ -78,6 +78,11 @@ class ResolverConfig(Strict):
     #: for `copy_keep_days`.
     copy: bool = False
     copy_keep_days: float = Field(default=7.0, gt=0)
+    #: Gates this resolver depends on (e.g. the release feed needs valid
+    #: credentials). Every service using one of this resolver's binaries
+    #: inherits these gates: while one fails, the service parks in `blocked`
+    #: instead of crash-looping into resolver failures.
+    requires: list[str] = Field(default_factory=list)
 
 
 class ReadyConfig(Strict):
@@ -196,6 +201,11 @@ class OrchestratorConfig(Strict):
                     f"resolvers.{rname}: a resolver's own cmd cannot use "
                     "{bin.*} placeholders"
                 )
+            for gate in resolver.requires:
+                if gate not in self.gates:
+                    raise ValueError(
+                        f"resolvers.{rname} requires unknown gate {gate!r}"
+                    )
         for gname, gate in self.gates.items():
             if bin_refs(gate.check):
                 raise ValueError(

@@ -44,7 +44,7 @@ def _load_config(path_str: str) -> OrchestratorConfig:
         _fail(f"config file not found: {path}")
     try:
         config = OrchestratorConfig.load(path)
-        validate_templates(config)
+        validate_templates(config, str(path.resolve().parent))
     except Exception as e:  # noqa: BLE001 - surface any config problem as exit 2
         _fail(f"invalid config: {e}")
     return config

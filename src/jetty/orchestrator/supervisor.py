@@ -25,7 +25,14 @@ from .containment import Containment
 from .gates import GateSet
 from .ports import PortError, allocate_ports
 from .registry import Registry, new_run_logs_dir
-from .render import RenderedService, build_context, render_gate_argv, render_service, render_str
+from .render import (
+    RenderedService,
+    build_context,
+    render_gate_argv,
+    render_service,
+    render_str,
+    resolve_command,
+)
 from .resolvers import Resolvers
 from .service import Service
 
@@ -63,6 +70,10 @@ class Supervisor:
         self._root = root
         self._containment = containment
         self._config_path = config_path
+        #: Relative config paths anchor here (and are confined to it).
+        self._config_dir = (
+            str(Path(config_path).resolve().parent) if config_path else os.getcwd()
+        )
         self._services: dict[str, Service] = {}
         self._ports: dict[str, int] = {}
         self._failure: str | None = None
@@ -96,11 +107,21 @@ class Supervisor:
 
         ctx = build_context(name, self._ports, str(inst_dir), str(logs_dir))
         gates = GateSet(
-            {n: (g, render_gate_argv(g, ctx)) for n, g in cfg.gates.items()}
+            {
+                n: (g, render_gate_argv(g, ctx, self._config_dir))
+                for n, g in cfg.gates.items()
+            }
         )
         self._resolvers = Resolvers(
             cfg.resolvers,
-            {n: [render_str(a, ctx) for a in r.cmd] for n, r in cfg.resolvers.items()},
+            {
+                n: resolve_command(
+                    [render_str(a, ctx) for a in r.cmd],
+                    self._config_dir,
+                    f"resolvers.{n} cmd",
+                )
+                for n, r in cfg.resolvers.items()
+            },
         )
         self._containment.setup(list(cfg.services))
 
@@ -122,16 +143,26 @@ class Supervisor:
                 if bins:
                     bin_ctx = await self._resolvers.context_for(bins)
                     self._enforce_pinning(sname, bins)
-                return render_service(svc_cfg, {**ctx, **bin_ctx})
+                return render_service(svc_cfg, {**ctx, **bin_ctx}, self._config_dir)
 
             return render
 
         for sname in start_order(cfg.services):
             svc_cfg = cfg.services[sname]
+            bins = service_bin_refs(svc_cfg)
+            # A service depends on its own gates plus those of every resolver
+            # it uses: a resolver that needs credentials must park its
+            # consumers as `blocked`, not crash-loop them into resolution
+            # failures.
+            requires = list(svc_cfg.requires)
+            for rname in sorted(self._resolvers.resolver_names(bins)):
+                for gate in cfg.resolvers[rname].requires:
+                    if gate not in requires:
+                        requires.append(gate)
             self._services[sname] = Service(
                 sname,
                 svc_cfg,
-                renderer(sname, svc_cfg, service_bin_refs(svc_cfg)),
+                renderer(sname, svc_cfg, bins),
                 self._containment,
                 gates,
                 logs_dir / f"{sname}.log",
@@ -139,6 +170,7 @@ class Supervisor:
                 extra_env,
                 notify,
                 fail,
+                requires=requires,
             )
 
         loop = asyncio.get_running_loop()

@@ -48,7 +48,7 @@ def bin_root() -> Path:
     return Path(env) if env else Path.home() / ".jetty" / "bin"
 
 
-def materialize(source: str, root: Path, keep_days: float) -> str:
+def materialize(source: str, root: Path, keep_days: float) -> tuple[str, str]:
     """Copy `source` into `root`, cached and vanish-resilient.
 
     The destination name is derived from the source PATH (basename plus a
@@ -66,6 +66,11 @@ def materialize(source: str, root: Path, keep_days: float) -> str:
     Aging: every use touches the copy's mtime, and `_prune` removes pairs
     unused for `keep_days` — so a binary in active rotation never expires,
     and last month's releases do.
+
+    Returns `(local path, content fingerprint)` — the fingerprint is the
+    source's `size mtime_ns` (from the sidecar when the source is gone), and
+    feeds the resolver generation so an in-place replacement at the same
+    path counts as a new release.
     """
     root.mkdir(parents=True, exist_ok=True)
     _prune(root, keep_days)
@@ -82,7 +87,11 @@ def materialize(source: str, root: Path, keep_days: float) -> str:
                 file=sys.stderr,
             )
             _touch(dest, meta)
-            return str(dest)
+            try:
+                fingerprint = meta.read_text()
+            except OSError:
+                fingerprint = "unknown"
+            return str(dest), fingerprint
         raise ResolveError(
             f"{source} is unreachable ({e.strerror}) and no cached copy exists"
         ) from None
@@ -92,7 +101,7 @@ def materialize(source: str, root: Path, keep_days: float) -> str:
     try:
         if dest.exists() and meta.read_text() == fingerprint:
             _touch(dest, meta)
-            return str(dest)
+            return str(dest), fingerprint
     except OSError:
         pass  # missing/unreadable sidecar: fall through to a fresh copy
     tmp = root / f".tmp-{os.getpid()}-{digest}"
@@ -100,7 +109,7 @@ def materialize(source: str, root: Path, keep_days: float) -> str:
     os.replace(tmp, dest)
     meta.write_text(fingerprint)
     _touch(dest, meta)
-    return str(dest)
+    return str(dest), fingerprint
 
 
 def _touch(dest: Path, meta: Path) -> None:
@@ -179,7 +188,7 @@ class Resolvers:
             for bin_name in cfg.provides
         }
         self._locks = {rname: asyncio.Lock() for rname in configs}
-        self._cache: dict[str, tuple[float, dict[str, str]]] = {}
+        self._cache: dict[str, tuple[float, dict[str, str], dict[str, str]]] = {}
         #: For the registry / `status`: last successful resolution per resolver.
         self.state: dict[str, dict] = {}
         #: Bumped only when a resolution's RESULT differs from the previous
@@ -213,10 +222,13 @@ class Resolvers:
                 age = time.monotonic() - cached[0]
                 if cfg.refresh == "instance" or age < cfg.cache_seconds:
                     return cached[1]
-            binaries, sources = await self._run(rname, cfg)
-            if cached is None or cached[1] != binaries:
+            binaries, sources, fingerprints = await self._run(rname, cfg)
+            # The generation key includes the content fingerprint, not just
+            # the paths: an in-place replacement at the same path is a new
+            # release too, and pinned groups must treat it as one.
+            if cached is None or cached[1:] != (binaries, fingerprints):
                 self.generation[rname] = self.generation.get(rname, 0) + 1
-            self._cache[rname] = (time.monotonic(), binaries)
+            self._cache[rname] = (time.monotonic(), binaries, fingerprints)
             self.state[rname] = {"binaries": binaries, "resolved_at": time.time()}
             if sources is not None:
                 self.state[rname]["copied_from"] = sources
@@ -224,8 +236,9 @@ class Resolvers:
 
     async def _run(
         self, rname: str, cfg: ResolverConfig
-    ) -> tuple[dict[str, str], dict[str, str] | None]:
-        """(binaries to use, their sources if `copy` rewrote them)."""
+    ) -> tuple[dict[str, str], dict[str, str] | None, dict[str, str]]:
+        """(binaries to use, sources if `copy` rewrote them, content
+        fingerprints keyed by binary name)."""
         argv = self._argvs[rname]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -265,28 +278,37 @@ class Resolvers:
             # Copies can be large and the source remote — off the event loop.
             # No existence pre-check here: a vanished source with a cached
             # copy is exactly the case `copy` exists for.
-            local = await asyncio.to_thread(self._copy_all, rname, binaries, cfg)
-            return local, binaries
+            local, fingerprints = await asyncio.to_thread(
+                self._copy_all, rname, binaries, cfg
+            )
+            return local, binaries, fingerprints
+        fingerprints: dict[str, str] = {}
         for bin_name, path in binaries.items():
-            if not os.path.exists(path):
+            try:
+                st = os.stat(path)
+            except OSError:
                 raise ResolveError(
                     f"resolver {rname!r} returned {bin_name}={path}, which does "
                     "not exist"
-                )
-        return binaries, None
+                ) from None
+            fingerprints[bin_name] = f"{st.st_size} {st.st_mtime_ns}"
+        return binaries, None, fingerprints
 
     @staticmethod
     def _copy_all(
         rname: str, binaries: dict[str, str], cfg: ResolverConfig
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], dict[str, str]]:
         local: dict[str, str] = {}
+        fingerprints: dict[str, str] = {}
         for bin_name, path in binaries.items():
             try:
-                local[bin_name] = materialize(path, bin_root(), cfg.copy_keep_days)
+                local[bin_name], fingerprints[bin_name] = materialize(
+                    path, bin_root(), cfg.copy_keep_days
+                )
             except ResolveError as e:
                 raise ResolveError(f"resolver {rname!r}: {bin_name}: {e}") from None
             except OSError as e:
                 raise ResolveError(
                     f"resolver {rname!r}: copying {bin_name}={path} failed: {e}"
                 ) from None
-        return local
+        return local, fingerprints

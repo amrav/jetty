@@ -25,7 +25,7 @@ from jetty.orchestrator.render import (  # noqa: E402
     build_context,
     render_str,
     validate_templates,
-)
+)  # resolve_config_path/resolve_command imported inside their tests
 
 
 def config_from(text: str) -> OrchestratorConfig:
@@ -134,7 +134,44 @@ class RenderTest(absltest.TestCase):
             MINIMAL.replace('["true"]', '["true", "{ports.nope}"]')
         )
         with self.assertRaisesRegex(ValueError, "ports.nope"):
-            validate_templates(cfg)
+            validate_templates(cfg, self.create_tempdir().full_path)
+
+
+class ConfigPathTest(absltest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.base = self.create_tempdir().full_path
+
+    def test_siblings_and_subtrees_resolve_absolute_paths_pass(self):
+        from jetty.orchestrator.render import resolve_config_path
+
+        self.assertEqual(
+            resolve_config_path("run.sh", self.base, "cmd"),
+            os.path.join(self.base, "run.sh"),
+        )
+        self.assertEqual(
+            resolve_config_path("scripts/run.sh", self.base, "cmd"),
+            os.path.join(self.base, "scripts/run.sh"),
+        )
+        self.assertEqual(resolve_config_path("/usr/bin/env", self.base, "cmd"), "/usr/bin/env")
+
+    def test_escaping_the_config_subtree_is_an_error(self):
+        from jetty.orchestrator.render import resolve_config_path
+
+        with self.assertRaisesRegex(RenderError, "outside the config"):
+            resolve_config_path("../sibling/run.sh", self.base, "cmd")
+
+    def test_bare_command_names_are_path_lookups(self):
+        from jetty.orchestrator.render import resolve_command
+
+        self.assertEqual(resolve_command(["python", "-V"], self.base, "cmd"), ["python", "-V"])
+        resolved = resolve_command(["./run.sh"], self.base, "cmd")
+        self.assertEqual(resolved, [os.path.join(self.base, "run.sh")])
+
+    def test_validate_templates_catches_escaping_cwd(self):
+        cfg = config_from(MINIMAL + 'cwd = "../elsewhere"\n')
+        with self.assertRaisesRegex(ValueError, "outside the config"):
+            validate_templates(cfg, self.base)
 
 
 class PortsTest(absltest.TestCase):
@@ -263,7 +300,12 @@ class MaterializeTest(absltest.TestCase):
     def materialize(self, source, keep_days=7.0) -> str:
         from jetty.orchestrator.resolvers import materialize
 
-        return materialize(source, self.root, keep_days)
+        return materialize(source, self.root, keep_days)[0]
+
+    def fingerprint(self, source) -> str:
+        from jetty.orchestrator.resolvers import materialize
+
+        return materialize(source, self.root, 7.0)[1]
 
     def test_copies_once_and_caches_by_path(self):
         source = self._source()
@@ -321,6 +363,24 @@ class MaterializeTest(absltest.TestCase):
 
         with self.assertRaisesRegex(ResolveError, "regular file"):
             self.materialize(str(self.srcdir))
+
+    def test_fingerprint_tracks_content_and_survives_vanishing(self):
+        source = self._source(content="v1")
+        fp1 = self.fingerprint(source)
+        Path(source).write_text("v2-longer")  # in-place release
+        fp2 = self.fingerprint(source)
+        self.assertNotEqual(fp1, fp2)
+        os.unlink(source)  # gone: the sidecar remembers what we run
+        self.assertEqual(self.fingerprint(source), fp2)
+
+
+class ResolverGateConfigTest(absltest.TestCase):
+    def test_unknown_resolver_gate_rejected(self):
+        with self.assertRaisesRegex(Exception, "unknown gate"):
+            config_from(
+                '[resolvers.app]\ncmd = ["true"]\nrequires = ["creds"]\n'
+                + MINIMAL.replace('["true"]', '["{bin.app}"]')
+            )
 
 
 class ServiceEnvTest(absltest.TestCase):

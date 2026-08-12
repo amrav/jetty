@@ -98,6 +98,24 @@ grace_seconds = 10.0        # then SIGKILL to the whole group
 `cmd`, `env` values, `cwd`, readiness probes and gate argvs after ports are
 allocated. `{{` / `}}` escape literal braces (`str.format` parsing rules).
 
+### Paths
+
+Relative paths in a config anchor to **the TOML file's directory**, not to
+wherever the supervisor was launched — a config means the same thing from
+any cwd. They may reach siblings and anything below the config's directory,
+but not outside it: `../sibling/thing` fails with a clear error at `check`
+time, because it silently depends on where the config is checked out.
+Anything outside the tree must be an absolute path — visible and deliberate.
+This applies to command paths (`cmd[0]`, gate `check[0]`, resolver `cmd[0]`
+— a bare name like `python` is a PATH lookup and passes through), to
+`ready.path`, and to `cwd`.
+
+Each service's runtime directory is its `cwd`: relative → config-relative
+and confined as above; absolute → anywhere; unset → the config file's own
+directory.
+
+### Environment
+
 Services also receive in their environment: `JETTY_ORC_INSTANCE`,
 `JETTY_ORC_SERVICE`, and — under cgroup containment — `JETTY_ORC_CGROUP_ROOT`,
 the instance's cgroup directory. A service that reports resource usage (a
@@ -157,8 +175,9 @@ supervisor before a spawn that needs it.
 
 ```toml
 [resolvers.release]
-cmd = ["infra/latest-release.sh"]        # runs in the supervisor's cwd
+cmd = ["infra/latest-release.sh"]        # config-relative, like all paths
 provides = ["control_plane", "harness"]  # names bound by ONE invocation
+requires = ["creds"]                     # optional: gates the feed depends on
 timeout_seconds = 30.0
 refresh = "spawn"        # default: re-run before each (re)spawn
                          # "instance": resolve once, pinned for the whole run
@@ -186,8 +205,14 @@ Semantics worth relying on:
   multi-binary resolver has moved to a new release, every sibling still
   running the previous release is bounced too — a budget-free restart, so
   the group can never run split across versions. The trigger is the
-  resolution *result changing*, not the crash itself: a service
+  resolution *result changing* — where "result" includes each binary's
+  content fingerprint (size + mtime), so an in-place rebuild at the same
+  path counts as a new release — never the crash itself: a service
   crash-looping on an unchanged release never touches its healthy siblings.
+- **Resolvers can be gated**: `requires = ["creds"]` on a resolver makes
+  every service using its binaries inherit that gate — while it fails, they
+  park in `blocked` (the resolver is not even run) instead of crash-looping
+  into resolution failures, and revive when it passes.
 - **Releases apply on respawn, never mid-flight**: the resolver moving does
   not, by itself, touch any running process; the new release lands when a
   service next crashes, is killed, or restarts (dragging its pinned

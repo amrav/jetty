@@ -31,7 +31,7 @@ from collections.abc import Awaitable
 from .config import ServiceConfig
 from .containment import Containment
 from .gates import GateSet
-from .render import RenderedService
+from .render import RenderedService, RenderError
 from .resolvers import ResolveError
 
 _TAIL_BYTES = 8192
@@ -51,6 +51,7 @@ class Service:
         extra_env: dict[str, str],
         notify: Callable[["Service"], None],
         fail: Callable[[str, "Service"], None],
+        requires: list[str] | None = None,
     ):
         self.name = name
         self.log_path = log_path
@@ -62,6 +63,10 @@ class Service:
         self.ready_event = asyncio.Event()
 
         self._cfg = cfg
+        #: The service's own gates plus those inherited from every resolver
+        #: it uses — a resolver that needs credentials makes its consumers
+        #: block on them rather than crash-loop into resolution failures.
+        self._requires = list(requires) if requires is not None else list(cfg.requires)
         #: Called before every spawn: placeholders like {bin.<name>} resolve
         #: to whatever the release is NOW, so a restart picks up a new binary.
         self._render = render
@@ -104,8 +109,8 @@ class Service:
                 return
         restart_cfg = self._cfg.restart
         while not self.stopping:
-            if self._cfg.requires:
-                ok, failing = await self._gates.satisfied(self._cfg.requires)
+            if self._requires:
+                ok, failing = await self._gates.satisfied(self._requires)
                 if not ok:
                     await self._block(failing)
                     continue
@@ -126,9 +131,9 @@ class Service:
                     "restart.no_restart_exit marks as not worth retrying"
                 )
                 return
-            if self._cfg.requires:
+            if self._requires:
                 ok, failing = await self._gates.satisfied(
-                    self._cfg.requires, refresh=True
+                    self._requires, refresh=True
                 )
                 if not ok:
                     self._log_note(
@@ -243,8 +248,8 @@ class Service:
         self._logf = open(self.log_path, "ab", buffering=0)
         try:
             self._rendered = await self._render()
-        except ResolveError as e:
-            msg = f"binary resolution failed: {e}"
+        except (ResolveError, RenderError) as e:
+            msg = f"spawn preparation failed: {e}"
             self._log_note(msg)
             self._logf.close()
             self._logf = None
@@ -389,11 +394,11 @@ class Service:
         self._notify(self)
         while not self.stopping:
             await self._race(
-                asyncio.sleep(self._gates.min_recheck(self._cfg.requires))
+                asyncio.sleep(self._gates.min_recheck(self._requires))
             )
             if self.stopping:
                 return
-            ok, failing = await self._gates.satisfied(self._cfg.requires)
+            ok, failing = await self._gates.satisfied(self._requires)
             if ok:
                 self.blocked_on = []
                 self._log_note("gates satisfied again; restarting")

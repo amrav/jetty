@@ -468,6 +468,71 @@ backoff_initial_seconds = 0.05
             what="svc_b running again",
         )
         self.assertEqual(self.record()["services"]["svc_b"]["restarts"], 0)
+
+        # An IN-PLACE release: same paths, new content. The fingerprint in
+        # the generation key must catch it and bounce the sibling.
+        b_pid_v2 = self.record()["services"]["svc_b"]["pid"]
+        with open(f"{self.workdir.full_path}/b-v2", "a") as f:
+            f.write("# rebuilt in place\n")
+        os.kill(self.record()["services"]["svc_a"]["pid"], signal.SIGKILL)
+        self.wait_until(
+            lambda: (
+                self.service_state("svc_b") == "running"
+                and self.record()["services"]["svc_b"]["pid"] not in (None, b_pid_v2)
+            ),
+            proc,
+            what="svc_b bounced after the in-place release",
+        )
+        self.assertEqual(self.record()["services"]["svc_b"]["restarts"], 0)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
+    def test_resolver_gate_blocks_consumers_without_spending_budget(self):
+        """A resolver that needs credentials: while its gate fails, services
+        using its binaries park as `blocked` — the resolver is never even
+        run, so there is no crash and no budget spent."""
+        app = os.path.join(self.workdir.full_path, "app")
+        with open(app, "w") as f:
+            f.write(f"#!{sys.executable}\nimport time\ntime.sleep(300)\n")
+        os.chmod(app, 0o755)
+        self.workdir.create_file("target.txt", content=app + "\n")
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[gates.creds]
+check = ["{sys.executable}", "-c", "import pathlib,sys; sys.exit(0 if pathlib.Path('flag').exists() else 1)"]
+recheck_seconds = 0.2
+
+[resolvers.app]
+cmd = ["cat", "target.txt"]
+requires = ["creds"]
+cache_seconds = 0.0
+
+[services.app]
+cmd = ["{{bin.app}}"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("app") == "blocked",
+            proc,
+            what="blocked on the resolver's gate",
+        )
+        record = self.record()
+        self.assertEqual(record["services"]["app"]["blocked_on"], ["creds"])
+        self.assertEqual(record["services"]["app"]["restarts"], 0)
+        self.assertEqual(record["resolvers"], {}, "resolver must not have run")
+
+        self.workdir.create_file("flag", content="ok")
+        self.wait_until(
+            lambda: self.service_state("app") == "running",
+            proc,
+            what="unblocked once credentials returned",
+        )
+        self.assertEqual(self.record()["services"]["app"]["restarts"], 0)
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
