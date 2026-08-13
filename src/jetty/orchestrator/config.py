@@ -166,6 +166,18 @@ class GateConfig:
     check: list[str]
     recheck_seconds: float = 15.0
     timeout_seconds: float = 20.0
+    #: A continuous gate is a runtime INVARIANT, not just a start
+    #: precondition: while it is closed, services requiring it must not run.
+    #: The supervisor polls it for running services and gracefully stops them
+    #: into `blocked` when it closes (budget-free), reviving them when it
+    #: reopens. Default gates never touch a running process.
+    continuous: bool = False
+    #: A check might flake; stopping a healthy process over one bad probe
+    #: would turn the blip into an outage. A continuous gate counts as
+    #: CLOSED only after this many consecutive failed checks (one real run
+    #: per recheck_seconds — closure latency ≈ close_after × recheck).
+    #: Reopening is immediate: one passing check revives the service.
+    close_after: int = 3
 
     @classmethod
     def parse(cls, raw: object, where: str) -> "GateConfig":
@@ -174,6 +186,8 @@ class GateConfig:
             check=t.take_argv("check", min_len=1),
             recheck_seconds=t.take_number("recheck_seconds", 15.0, gt=0),
             timeout_seconds=t.take_number("timeout_seconds", 20.0, gt=0),
+            continuous=t.take_bool("continuous", False),
+            close_after=t.take_int("close_after", 3, ge=1),
         )
         t.done()
         return cfg

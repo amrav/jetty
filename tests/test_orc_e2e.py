@@ -314,6 +314,76 @@ max_restarts = 1
         proc.send_signal(signal.SIGTERM)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_continuous_gate_stops_and_revives_with_flake_tolerance(self):
+        """continuous = true: a closed gate stops the RUNNING process into
+        `blocked` (budget-free) and reopening revives it — but only after
+        close_after consecutive failures, so a single flaky check is
+        survived. The flake is made deterministic: the check consumes a
+        marker file, guaranteeing exactly one failure."""
+        self.workdir.create_file("flag", content="ok")
+        check = (
+            "import pathlib, sys\n"
+            "if pathlib.Path('flake-once').exists():\n"
+            "    pathlib.Path('flake-once').unlink()\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0 if pathlib.Path('flag').exists() else 1)\n"
+        )
+        self.workdir.create_file("check.py", content=check)
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[gates.creds]
+check = ["{sys.executable}", "check.py"]
+recheck_seconds = 0.15
+continuous = true
+close_after = 3
+
+[services.app]
+cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
+requires = ["creds"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("app") == "running", proc, what="running"
+        )
+        pid = self.record()["services"]["app"]["pid"]
+
+        # One flaky failure: consumed by the check itself, so exactly one
+        # strike. The service must survive it.
+        self.workdir.create_file("flake-once", content="")
+        self.wait_until(
+            lambda: not os.path.exists("flake-once"), proc, what="flake consumed"
+        )
+        time.sleep(1.0)  # several more check windows pass
+        self.assertEqual(self.service_state("app"), "running")
+        self.assertEqual(self.record()["services"]["app"]["pid"], pid)
+
+        # A real closure: three consecutive strikes stop the process.
+        os.unlink("flag")
+        self.wait_until(
+            lambda: self.service_state("app") == "blocked",
+            proc,
+            what="stopped into blocked after 3 strikes",
+        )
+        self.assertTrue(self.pid_gone(pid), "process should be stopped")
+        self.assertEqual(self.record()["services"]["app"]["restarts"], 0)
+
+        # Reopening revives on a single pass.
+        self.workdir.create_file("flag", content="ok")
+        self.wait_until(
+            lambda: self.service_state("app") == "running"
+            and self.record()["services"]["app"]["pid"] not in (None, pid),
+            proc,
+            what="revived after the gate reopened",
+        )
+        self.assertEqual(self.record()["services"]["app"]["restarts"], 0)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_killed_service_is_restarted(self):
         config = self.write_config(
             f"""

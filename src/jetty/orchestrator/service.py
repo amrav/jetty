@@ -52,6 +52,7 @@ class Service:
         notify: Callable[["Service"], None],
         fail: Callable[[str, "Service"], None],
         requires: list[str] | None = None,
+        continuous_requires: list[str] | None = None,
         echo: Callable[[bytes], None] | None = None,
     ):
         self.name = name
@@ -82,8 +83,13 @@ class Service:
         #: durable copy, this is the visible one.
         self._echo = echo
 
+        #: The subset of `requires` marked continuous: runtime invariants. A
+        #: watcher polls them while the process runs and stops it into
+        #: `blocked` when one closes (stays closed past its flake tolerance).
+        self._continuous_requires = list(continuous_requires or [])
         self._stop_event = asyncio.Event()
         self._bounce_requested = False
+        self._gate_stop = False
         self._fail_times: list[float] = []
         self._tail = bytearray()
         self._logf = None
@@ -121,6 +127,12 @@ class Service:
             code = await self._run_once()
             if self.stopping:
                 break
+            if self._gate_stop:
+                # The continuous-gate watcher stopped us: not a crash, so no
+                # exit classification and no budget — the loop top re-checks
+                # the gates and parks in `blocked` until they reopen.
+                self._gate_stop = False
+                continue
             if self._bounce_requested:
                 # A supervisor-initiated restart (pinned binary group moved):
                 # not this service's fault, so no exit classification, no
@@ -231,10 +243,23 @@ class Service:
         if err is not None:
             return 127
         assert self.proc is not None
-        if await self._wait_ready():
-            self._set_state("running")
-            self.ready_event.set()
-        code = await self.proc.wait()
+        watcher = (
+            asyncio.create_task(self._watch_continuous_gates())
+            if self._continuous_requires
+            else None
+        )
+        try:
+            if await self._wait_ready():
+                self._set_state("running")
+                self.ready_event.set()
+            code = await self.proc.wait()
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
         if self._reader_task is not None:
             await self._reader_task
             self._reader_task = None
@@ -392,6 +417,42 @@ class Service:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+    async def _watch_continuous_gates(self) -> None:
+        """Runs beside a live incarnation: polls the service's continuous
+        gates and, when one has failed `close_after` consecutive real checks
+        (checks share the GateSet cache, so one run per recheck window), does
+        a graceful stop. The run loop then routes through `blocked` — no
+        budget, no exit classification — and revives on the next pass."""
+        names = self._continuous_requires
+        streaks: dict[str, int] = {}
+        while True:
+            await asyncio.sleep(self._gates.min_recheck(names))
+            if (
+                self.stopping
+                or self.proc is None
+                or self.proc.returncode is not None
+            ):
+                return
+            _ok, failing = await self._gates.satisfied(names)
+            for name in names:
+                streaks[name] = streaks.get(name, 0) + 1 if name in failing else 0
+            closed = [
+                n for n in failing if streaks[n] >= self._gates.close_after(n)
+            ]
+            if not closed:
+                continue
+            if self.stopping or self.proc is None or self.proc.returncode is not None:
+                return
+            self._gate_stop = True
+            self._log_note(
+                f"continuous gate(s) {', '.join(closed)} closed "
+                f"({max(streaks[n] for n in closed)} consecutive failed checks); "
+                "stopping until they reopen"
+            )
+            await self._terminate_group()
+            self._containment.sweep(self.name, signal.SIGKILL)
+            return
 
     async def _block(self, failing: list[str]) -> None:
         """Park until every required gate passes (or stop). Entering blocked

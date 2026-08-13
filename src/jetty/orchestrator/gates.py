@@ -40,6 +40,13 @@ class GateSet:
     def min_recheck(self, names: list[str]) -> float:
         return min(self._gates[n][0].recheck_seconds for n in names)
 
+    def continuous(self, names: list[str]) -> list[str]:
+        """The subset of `names` marked `continuous = true`."""
+        return [n for n in names if self._gates[n][0].continuous]
+
+    def close_after(self, name: str) -> int:
+        return self._gates[name][0].close_after
+
     async def _check(self, name: str, refresh: bool) -> bool:
         cfg, argv = self._gates[name]
         async with self._locks[name]:
