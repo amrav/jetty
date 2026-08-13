@@ -47,6 +47,19 @@ class GateSet:
     def close_after(self, name: str) -> int:
         return self._gates[name][0].close_after
 
+    async def poll(self, names: list[str]) -> dict[str, tuple[bool, float]]:
+        """Per-gate `(ok, run_stamp)` — the stamp identifies the underlying
+        CHECK RUN (it only moves when the check actually executed). A caller
+        counting consecutive failures must key on it: gates with different
+        recheck cadences serve cached results to a fast poller, and counting
+        a cached failure again would let one real flake masquerade as a
+        streak."""
+        out: dict[str, tuple[bool, float]] = {}
+        for name in names:
+            ok = await self._check(name, refresh=False)
+            out[name] = (ok, self._cache[name][0])
+        return out
+
     async def _check(self, name: str, refresh: bool) -> bool:
         cfg, argv = self._gates[name]
         async with self._locks[name]:

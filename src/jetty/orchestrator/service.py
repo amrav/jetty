@@ -420,12 +420,19 @@ class Service:
 
     async def _watch_continuous_gates(self) -> None:
         """Runs beside a live incarnation: polls the service's continuous
-        gates and, when one has failed `close_after` consecutive real checks
-        (checks share the GateSet cache, so one run per recheck window), does
-        a graceful stop. The run loop then routes through `blocked` — no
-        budget, no exit classification — and revives on the next pass."""
+        gates and, when one has failed `close_after` consecutive REAL checks,
+        does a graceful stop. The run loop then routes through `blocked` — no
+        budget, no exit classification — and revives on the next pass.
+
+        The loop wakes at the fastest gate's cadence, so slower gates serve
+        cached results on most wakes. Streaks are keyed on each result's run
+        stamp — counted once per actual check execution — or a single real
+        flake of a slow gate would be re-counted from cache every wake and
+        hit close_after in seconds, exactly what close_after exists to
+        prevent."""
         names = self._continuous_requires
         streaks: dict[str, int] = {}
+        counted: dict[str, float] = {}
         while True:
             await asyncio.sleep(self._gates.min_recheck(names))
             if (
@@ -434,11 +441,16 @@ class Service:
                 or self.proc.returncode is not None
             ):
                 return
-            _ok, failing = await self._gates.satisfied(names)
-            for name in names:
-                streaks[name] = streaks.get(name, 0) + 1 if name in failing else 0
+            results = await self._gates.poll(names)
+            for name, (ok, stamp) in results.items():
+                if counted.get(name) == stamp:
+                    continue  # cached result; this run is already counted
+                counted[name] = stamp
+                streaks[name] = 0 if ok else streaks.get(name, 0) + 1
             closed = [
-                n for n in failing if streaks[n] >= self._gates.close_after(n)
+                n
+                for n, (ok, _) in results.items()
+                if not ok and streaks.get(n, 0) >= self._gates.close_after(n)
             ]
             if not closed:
                 continue
