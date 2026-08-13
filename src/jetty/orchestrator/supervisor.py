@@ -208,6 +208,7 @@ class Supervisor:
                 notify,
                 fail,
                 requires=requires,
+                continuous_requires=gates.continuous(requires),
                 echo=echo_for(sname) if echo_for is not None else None,
             )
 

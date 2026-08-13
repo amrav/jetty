@@ -81,6 +81,14 @@ db  = "9000-9020"           # same, bounded: error if the whole range is taken
 check = ["auth-tool", "status"]   # argv; exit 0 = satisfied
 recheck_seconds = 15.0            # cache + poll cadence while blocked
 timeout_seconds = 20.0            # unrunnable/overdue check = unsatisfied
+continuous = false                # true = runtime invariant: a RUNNING
+                                  # service is stopped (budget-free, into
+                                  # `blocked`) while the gate is closed,
+                                  # and revived when it reopens
+close_after = 3                   # continuous only: consecutive failed
+                                  # checks before "closed" — one flaky
+                                  # probe never kills a healthy process;
+                                  # reopening takes a single pass
 
 [services.api]
 cmd = ["python", "-m", "uvicorn", "app:app", "--port", "{ports.api}"]
@@ -239,6 +247,18 @@ asked to, the exit is classified, in order:
    already missing starts life `blocked` instead of crash-looping.
 3. **Otherwise** → restart after exponential backoff. More than
    `max_restarts` such exits within `window_seconds` fails the instance.
+
+By default a gate never touches a *running* process — it is a start
+precondition, and a live service rides out an expired credential until it
+crashes on its own. A gate with `continuous = true` is stronger: a runtime
+invariant. The supervisor polls it for every running service that requires
+it (directly or via a resolver), and once it has failed `close_after`
+consecutive checks — real runs, one per `recheck_seconds`, so a single
+flaky probe is survived — the service is gracefully stopped (stop signal →
+grace → SIGKILL to the group) and parked in `blocked`: no exit
+classification, no restart budget. One passing check reopens the gate and
+revives the service. Closure latency ≈ `close_after × recheck_seconds`;
+reopening is immediate by design — slow to kill, quick to recover.
 
 An instance failure stops every other service in reverse dependency order
 (graceful signal → grace period → SIGKILL), prints the failing service's log

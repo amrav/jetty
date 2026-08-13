@@ -45,6 +45,9 @@ web = "5173+"         # prefer 5173; occupied -> 5174, 5175, ...
 [gates.creds]
 check = ["my-auth-tool", "status", "--quiet"]
 recheck_seconds = 30
+#continuous = true    # runtime invariant: STOP a running service while the
+                      # gate is closed (after close_after = 3 consecutive
+                      # failed checks), revive when it reopens
 
 [services.backend]
 cmd = ["python", "-m", "my_backend", "--port", "{ports.backend}"]
