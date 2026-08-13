@@ -285,6 +285,30 @@ class EnvSubstitutionTest(absltest.TestCase):
         with mock.patch.dict(os.environ, clear=True):
             validate_templates(cfg, self.base)  # defaults keep it valid
 
+    def test_port_specs_render_env(self):
+        from jetty.orchestrator.config import parse_port_spec
+        from jetty.orchestrator.render import render_port_specs
+
+        # A digit string is a fixed port — what env substitution produces.
+        self.assertEqual(parse_port_spec("8080"), (8080, 8080))
+
+        cfg = config_from(
+            '[ports]\nhttp = "{env.ORC_TEST_PORT:-8080+}"\n' + MINIMAL
+        )
+        ctx = build_context("dev", {}, "/s", "/l")
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(render_port_specs(cfg, ctx)["http"], "8080+")
+        with mock.patch.dict(os.environ, {"ORC_TEST_PORT": "9000"}):
+            self.assertEqual(render_port_specs(cfg, ctx)["http"], "9000")
+        with mock.patch.dict(os.environ, {"ORC_TEST_PORT": "nonsense"}):
+            with self.assertRaisesRegex(RenderError, "not a valid port spec"):
+                render_port_specs(cfg, ctx)
+
+    def test_port_spec_cannot_reference_other_ports(self):
+        cfg = config_from('[ports]\na = "auto"\nb = "{ports.a}"\n' + MINIMAL)
+        with self.assertRaisesRegex(ValueError, "unknown placeholder"):
+            validate_templates(cfg, self.base)
+
     def test_cwd_from_env_with_tilde_default(self):
         from jetty.orchestrator.render import render_service
 

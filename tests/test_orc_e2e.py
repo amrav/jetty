@@ -801,6 +801,37 @@ cmd = ["{{bin.app}}"]
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_port_spec_from_env(self):
+        import socket
+
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        free = holder.getsockname()[1]
+        holder.close()
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[ports]
+http = "{{env.ORC_E2E_PORT:-auto}}"
+
+[services.web]
+cmd = ["{sys.executable}", "-m", "http.server", "{{ports.http}}", "--bind", "127.0.0.1"]
+[services.web.ready]
+http = "http://127.0.0.1:{{ports.http}}/"
+"""
+        )
+        self.env["ORC_E2E_PORT"] = str(free)
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("web") == "running", proc, what="running"
+        )
+        self.assertEqual(self.record()["ports"]["http"], free)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_env_default_placeholders_forward_optional_flags(self):
         self.workdir.create_file(
             "argv.py",

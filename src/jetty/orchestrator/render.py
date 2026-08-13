@@ -222,11 +222,40 @@ def render_gate_argv(
     return render_argv(gate.check, ctx, config_dir, "gate check")
 
 
+def render_port_specs(
+    config: OrchestratorConfig, ctx_without_ports: dict[str, str]
+) -> dict[str, int | str]:
+    """Templated port specs, rendered and validated. Ports allocate before
+    the full context exists (they are part of it), so the context here is
+    the pre-ports one — a `{ports.*}` reference inside a port spec is a
+    self-reference and fails as an unknown placeholder."""
+    from .config import parse_port_spec  # local: avoids exporting it twice
+
+    out: dict[str, int | str] = {}
+    for name, want in config.ports.items():
+        if isinstance(want, str) and "{" in want:
+            rendered = render_str(want, ctx_without_ports)
+            if parse_port_spec(rendered) is None:
+                raise RenderError(
+                    f"ports.{name}: {want!r} rendered to {rendered!r}, which "
+                    'is not a valid port spec (want "auto", 8000, "8000+" or '
+                    '"8000-8020")'
+                )
+            out[name] = rendered
+        else:
+            out[name] = want
+    return out
+
+
 def validate_templates(config: OrchestratorConfig, config_dir: str) -> None:
     """Render everything against a dummy context so `check` (and `up`, before
     any process is spawned) catches placeholder typos — and, because dummy
     values are absolute, any confinement violation in a STATIC relative path
     surfaces here too."""
+    render_port_specs(
+        config,
+        build_context(config.instance.name, {}, "/dev/null", "/dev/null"),
+    )
     ctx = build_context(
         config.instance.name,
         {name: 1 for name in config.ports},
