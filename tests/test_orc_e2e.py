@@ -384,6 +384,74 @@ requires = ["creds"]
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_slow_continuous_gate_flake_is_not_recounted_from_cache(self):
+        """Two continuous gates with different cadences: the watcher wakes at
+        the fast gate's rate, so the slow gate serves cached results on most
+        wakes. A single real flake of the slow gate must count ONCE — under
+        the cache-recounting bug it reached close_after within a few fast
+        wakes and killed the service."""
+        self.workdir.create_file("flag", content="ok")
+        slow_check = (
+            "import pathlib, sys\n"
+            "if pathlib.Path('flake-once').exists():\n"
+            "    pathlib.Path('flake-once').unlink()\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n"
+        )
+        self.workdir.create_file("slow_check.py", content=slow_check)
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[gates.fast]
+check = ["{sys.executable}", "-c", "import pathlib,sys; sys.exit(0 if pathlib.Path('flag').exists() else 1)"]
+recheck_seconds = 0.1
+continuous = true
+close_after = 3
+
+[gates.slow]
+check = ["{sys.executable}", "slow_check.py"]
+recheck_seconds = 1.0
+continuous = true
+close_after = 3
+
+[services.app]
+cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
+requires = ["fast", "slow"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("app") == "running", proc, what="running"
+        )
+        pid = self.record()["services"]["app"]["pid"]
+
+        # Arm the slow gate's single flake; it fires on its next real run.
+        self.workdir.create_file("flake-once", content="")
+        self.wait_until(
+            lambda: not os.path.exists("flake-once"),
+            proc,
+            what="slow gate's one real failure",
+        )
+        # Many fast-gate wakes pass; the slow gate's cached failure must not
+        # be re-counted into a streak.
+        time.sleep(1.5)
+        self.assertEqual(self.service_state("app"), "running")
+        self.assertEqual(self.record()["services"]["app"]["pid"], pid)
+
+        # Sanity: genuine consecutive failures still close (the fast gate).
+        os.unlink("flag")
+        self.wait_until(
+            lambda: self.service_state("app") == "blocked",
+            proc,
+            what="fast gate closes after real consecutive failures",
+        )
+        self.assertTrue(self.pid_gone(pid))
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_killed_service_is_restarted(self):
         config = self.write_config(
             f"""
