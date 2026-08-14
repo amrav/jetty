@@ -417,6 +417,11 @@ class OrchestratorConfig:
 
         fixed: dict[int, str] = {}
         for name, want in self.ports.items():
+            if isinstance(want, str) and "{" in want:
+                # A templated spec ("{env.HTTP_PORT:-8080+}"): the rendered
+                # form is validated at template-check time and again at
+                # launch, when the environment is actually consulted.
+                continue
             if not isinstance(want, (int, str)) or parse_port_spec(want) is None:
                 raise ConfigError(
                     f"ports.{name} = {want!r} is not a valid port spec "
@@ -591,6 +596,11 @@ def parse_port_spec(want: int | str) -> tuple[int, int] | Literal["auto"] | None
         return "auto"
     if isinstance(want, int):
         return (want, want) if 1 <= want <= 65535 else None
+    if want.isdigit():
+        # A fixed port as a string — what an env substitution naturally
+        # produces (HTTP_PORT=8080 arrives as "8080").
+        port = int(want)
+        return (port, port) if 1 <= port <= 65535 else None
     low_s, sep, high_s = want.partition("-")
     if sep:
         high_valid = high_s.isdigit()

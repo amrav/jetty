@@ -180,6 +180,13 @@ An env placeholder embedded in a larger element (`"--x={env.Y:-}"`)
 substitutes as plain text and stays one argument. Env vars are read at
 render time, i.e. per spawn.
 
+Port specs render too: `http = "{env.HTTP_PORT:-8080+}"` lets the
+environment pick the spec (a bare number like `HTTP_PORT=9000` means that
+fixed port; `auto` and scan forms work as values as well). Ports allocate
+before the rest of the context exists, so a `{ports.*}` reference inside a
+port spec is a self-reference and fails at `check`. The rendered spec is
+validated at `check` and again at launch.
+
 Paths compose with this: substitution happens before path resolution, so
 `cwd = "{env.MY_PROJECT_DIR:-~/projects}"` uses the variable when set and
 falls back to `~/projects` — and a `~` inside the variable's value expands

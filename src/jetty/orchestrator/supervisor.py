@@ -27,6 +27,8 @@ from .ports import PortError, allocate_ports
 from .registry import Registry, new_run_logs_dir
 from .render import (
     RenderedService,
+    RenderError,
+    render_port_specs,
     build_context,
     render_gate_argv,
     render_service,
@@ -103,8 +105,13 @@ class Supervisor:
         self._registry = Registry(self._root)
 
         try:
-            self._ports = allocate_ports(cfg.ports)
-        except PortError as e:
+            # Port specs may carry {env.*} placeholders; render them against
+            # the pre-ports context (ports themselves are not yet known).
+            specs = render_port_specs(
+                cfg, build_context(name, {}, str(inst_dir), str(logs_dir))
+            )
+            self._ports = allocate_ports(specs)
+        except (PortError, RenderError) as e:
             _note(str(e))
             return 1
 
