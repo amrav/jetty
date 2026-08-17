@@ -99,6 +99,13 @@ def _register_builtins() -> None:
 
     register("hg", _hg)
 
+    def _mail(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.mail.module import MailModule
+
+        return MailModule(settings)
+
+    register("mail", _mail)
+
     # `auth` and `llmproxy` are specified in spec/ and not yet implemented.
     # They are deliberately NOT registered: naming them here before they exist
     # would let `enabled = true` boot a sidecar that answers auth questions
