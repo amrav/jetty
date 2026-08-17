@@ -231,12 +231,15 @@ class ResolverConfig:
 @dataclasses.dataclass
 class ReadyConfig:
     """How to tell the service is actually up. At most one of `http` (GET
-    must return < 400), `tcp` (`host:port` connects) or `path` (file exists —
-    the natural probe for a UDS listener). With none of the three, the
+    must return < 400), `tcp` (`host:port` connects), `uds` (unix socket
+    connects — the robust probe for a UDS listener) or `path` (file exists).
+    `path` cannot tell a live socket from a stale file left by a crashed
+    incarnation; prefer `uds` for sockets. With none of the four, the
     service counts as ready the moment it spawned."""
 
     http: str | None = None
     tcp: str | None = None
+    uds: str | None = None
     path: str | None = None
     timeout_seconds: float = 30.0
     interval_seconds: float = 0.25
@@ -247,13 +250,14 @@ class ReadyConfig:
         cfg = cls(
             http=t.take_str("http"),
             tcp=t.take_str("tcp"),
+            uds=t.take_str("uds"),
             path=t.take_str("path"),
             timeout_seconds=t.take_number("timeout_seconds", 30.0, gt=0),
             interval_seconds=t.take_number("interval_seconds", 0.25, gt=0),
         )
         t.done()
-        if sum(x is not None for x in (cfg.http, cfg.tcp, cfg.path)) > 1:
-            raise ConfigError(f"{where}: configure at most one of http/tcp/path")
+        if sum(x is not None for x in (cfg.http, cfg.tcp, cfg.uds, cfg.path)) > 1:
+            raise ConfigError(f"{where}: configure at most one of http/tcp/uds/path")
         if cfg.http is not None and not cfg.http.startswith("http://"):
             raise ConfigError(
                 f"{where}.http must be an http:// URL (probes are loopback)"
@@ -583,6 +587,7 @@ def service_bin_refs(svc: ServiceConfig) -> set[str]:
             svc.cwd or "",
             svc.ready.http or "",
             svc.ready.tcp or "",
+            svc.ready.uds or "",
             svc.ready.path or "",
         ]
     )

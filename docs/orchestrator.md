@@ -100,7 +100,8 @@ requires = ["creds"]        # gates this service depends on
 [services.api.ready]        # at most one probe; none = ready once spawned
 http = "http://127.0.0.1:{ports.api}/healthz"   # GET, any status < 400
 # tcp  = "127.0.0.1:{ports.api}"                # connect succeeds
-# path = "{state_dir}/api.sock"                 # file exists (UDS listeners)
+# uds  = "{state_dir}/api.sock"                 # unix socket connect succeeds
+# path = "{state_dir}/api.pid"                  # file exists
 timeout_seconds = 30.0      # probe never passes -> incarnation killed + counted
 interval_seconds = 0.25
 
@@ -208,7 +209,7 @@ time, because it silently depends on where the config is checked out.
 Anything outside the tree must be an absolute path — visible and deliberate.
 This applies to command paths (`cmd[0]`, gate `check[0]`, resolver `cmd[0]`
 — a bare name like `python` is a PATH lookup and passes through), to
-`ready.path`, and to `cwd`.
+`ready.path`, `ready.uds`, and to `cwd`.
 
 `~` and `~user` expand and count as absolute — like an absolute path, they
 name a location deliberately. `{home}` is also available as a placeholder
@@ -454,6 +455,17 @@ Root: `--root` flag > `$JETTY_ORC_ROOT` > `$XDG_STATE_HOME/jetty-orc`
 <root>/instances/<name>/              # {state_dir}: databases, generated configs, ...
 ~/.jetty/logs/<name>-<timestamp>/     # {logs_dir}: <service>.log, one dir per run
 ```
+
+`{state_dir}` is created (and re-pinned on every `up`) with mode `0700`, so
+it is the natural home for coordination sockets: services on one instance
+rendezvous over `"{state_dir}/<name>.sock"` and the directory mode is the
+ACL — unlike a loopback TCP port, which any local user can connect to. Probe
+such a service with `ready.uds`, which `connect()`s and therefore isn't
+fooled by a stale socket file left behind by a crashed incarnation (a bare
+`ready.path` is). Two things are the service's own job: unlink a pre-existing
+socket path before binding, and keep paths short — `sun_path` caps unix
+socket paths at ~107 bytes, which a deep `--root` plus a long instance name
+can exceed (a `ready.uds` probe over the cap is a render-time error).
 
 A record names its supervisor by pid **and** kernel start-ticks, so a
 recycled pid can't impersonate a live instance; zombies count as dead.

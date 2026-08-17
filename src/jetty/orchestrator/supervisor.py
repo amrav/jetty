@@ -99,6 +99,9 @@ class Supervisor:
         name = cfg.instance.name
         inst_dir = self._root / "instances" / name
         inst_dir.mkdir(parents=True, exist_ok=True)
+        # Coordination sockets live in here; the directory mode is their ACL,
+        # so pin it regardless of umask or what an older version created.
+        inst_dir.chmod(0o700)
         logs_dir = new_run_logs_dir(name)
         self._logs_dir = logs_dir
         self._created = time.time()

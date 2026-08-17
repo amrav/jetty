@@ -48,6 +48,34 @@ time.sleep(300)
 """
 
 
+#: A minimal UDS server: unlinks a stale path, binds, listens, serves forever.
+UDS_SERVER_SCRIPT = """
+import os, socket, time
+path = os.environ["SOCK"]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(path)
+s.listen(1)
+while True:
+    conn, _ = s.accept()
+    conn.close()
+"""
+
+#: Binds a UDS path and immediately closes the socket: the file exists but
+#: nothing listens — the stale-socket-file shape a `path` probe would
+#: false-positive on.
+UDS_STALE_SCRIPT = """
+import os, socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(os.environ["SOCK"])
+s.close()
+time.sleep(300)
+"""
+
+
 class OrcE2ETest(absltest.TestCase):
     def setUp(self):
         super().setUp()
@@ -154,6 +182,73 @@ class OrcE2ETest(absltest.TestCase):
         return False
 
     # -- tests --
+
+    def _skip_if_sun_path_tight(self) -> None:
+        # The probe path renders to <workdir>/s; on hosts with a very deep
+        # TEST_TMPDIR that would blow the ~107-byte sun_path cap (correctly
+        # rejected at render time, but not what these tests probe). The
+        # services themselves bind a cwd-relative path, which sidesteps the cap.
+        if len(os.fsencode(self.workdir.full_path)) + len("/s") > 107:
+            self.skipTest("temp dir too deep for a sun_path-sized socket path")
+
+    def test_uds_ready_probe_and_state_dir_mode(self):
+        self._skip_if_sun_path_tight()
+        self.workdir.create_file("sockd.py", content=UDS_SERVER_SCRIPT)
+        config = self.write_config(
+            f"""
+[instance]
+name = "d"
+containment = "pgroup"
+
+[services.sockd]
+cmd = ["{sys.executable}", "sockd.py"]
+env = {{ SOCK = "s" }}
+[services.sockd.ready]
+uds = "s"
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("sockd", name="d") == "running",
+            proc,
+            what="uds-probed service running",
+        )
+        # readiness came from connect(), so the socket file must exist in the
+        # service's cwd (= the config's directory = this workdir)
+        self.assertTrue(os.path.exists("s"))
+        record = self.record("d")
+        state_dir = os.path.join(
+            self.env["JETTY_ORC_ROOT"], "instances", record["name"]
+        )
+        # the natural socket home is {state_dir}; its mode is the ACL
+        self.assertEqual(os.stat(state_dir).st_mode & 0o777, 0o700)
+
+    def test_uds_probe_rejects_stale_socket_file(self):
+        self._skip_if_sun_path_tight()
+        self.workdir.create_file("stale.py", content=UDS_STALE_SCRIPT)
+        config = self.write_config(
+            f"""
+[instance]
+name = "d"
+containment = "pgroup"
+
+[services.stale]
+cmd = ["{sys.executable}", "stale.py"]
+env = {{ SOCK = "s" }}
+[services.stale.ready]
+uds = "s"
+timeout_seconds = 1.0
+[services.stale.restart]
+max_restarts = 0
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        rc = proc.wait(timeout=STARTUP_TIMEOUT_S)
+        output = self.output_of(proc)
+        # the socket FILE exists, but connect() finds no listener: the probe
+        # must time out and fail the incarnation, not report ready
+        self.assertEqual(rc, 1, output)
+        self.assertIn("readiness probe", output)
 
     def test_up_ready_then_sigint_kills_whole_tree(self):
         self.workdir.create_file("tree.py", content=TREE_SCRIPT)

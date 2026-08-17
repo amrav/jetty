@@ -177,6 +177,11 @@ def render_argv(
     return resolve_command(out, config_dir, what)
 
 
+#: Linux sun_path is 108 bytes including the trailing NUL; a longer probe
+#: target can never be connected to, so it is a render-time error.
+_SUN_PATH_MAX = 107
+
+
 @dataclasses.dataclass(frozen=True)
 class RenderedService:
     cmd: list[str]
@@ -184,6 +189,7 @@ class RenderedService:
     env: dict[str, str]
     ready_http: str | None
     ready_tcp: str | None
+    ready_uds: str | None
     ready_path: str | None
 
 
@@ -206,12 +212,22 @@ def render_service(
     ready_path = render_str(svc.ready.path, ctx) if svc.ready.path else None
     if ready_path is not None:
         ready_path = resolve_config_path(ready_path, config_dir, "ready.path")
+    ready_uds = render_str(svc.ready.uds, ctx) if svc.ready.uds else None
+    if ready_uds is not None:
+        ready_uds = resolve_config_path(ready_uds, config_dir, "ready.uds")
+        if len(os.fsencode(ready_uds)) > _SUN_PATH_MAX:
+            raise RenderError(
+                f"ready.uds: {ready_uds!r} is {len(os.fsencode(ready_uds))} bytes; "
+                f"unix socket paths are capped at {_SUN_PATH_MAX} (sun_path) — "
+                "use a shorter instance name or --root"
+            )
     return RenderedService(
         cmd=cmd,
         cwd=cwd,
         env={k: render_str(v, ctx) for k, v in svc.env.items()},
         ready_http=render_str(svc.ready.http, ctx) if svc.ready.http else None,
         ready_tcp=render_str(svc.ready.tcp, ctx) if svc.ready.tcp else None,
+        ready_uds=ready_uds,
         ready_path=ready_path,
     )
 
