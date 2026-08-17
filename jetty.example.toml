@@ -49,6 +49,24 @@ enabled = true
 #   listener = "127.0.0.1:7242"
 #   surfaces = ["openai", "anthropic", "gemini"]
 
+# Outbound mail relay (spec/mail-v1.md): accepts a fully-composed message on
+# POST /mail/v1/send and delivers it through a driver. This build ships the
+# `spool` driver (each accepted message becomes a JSON file — development, CI,
+# conformance); delivery drivers are private implementations.
+#
+#   [modules.mail]
+#   enabled = true
+#   driver = "spool"
+#   spool_dir = "/tmp/jetty/mail-spool"
+#   # The one permitted `from` (plus-addressing allowed) and the one
+#   # deliverable recipient domain; empty = unconstrained.
+#   sender = "relay-bot+notify@corp.example"
+#   domain = "corp.example"
+#   # Bearer required on /mail/v1/* when set (do set it on a TCP listener).
+#   token = ""
+#   # Force a failure mode for retry-path tests: "503" | "429" | "422".
+#   fail = ""
+
 # Google Chat API v1 subset over a pluggable driver. See spec/chat-v1.md.
 # This build ships the `mock` driver (in-memory, seedable — development, CI,
 # conformance); `passthrough` is specified but not yet implemented.

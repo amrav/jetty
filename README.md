@@ -34,6 +34,7 @@ details stay internal.
 | `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
 | `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `issuetracker` module ([`spec/issuetracker-v1.md`](spec/issuetracker-v1.md)) | Specified (**experimental**), not implemented |
+| `mail` module ([`spec/mail-v1.md`](spec/mail-v1.md)) — outbound mail relay | **Implemented, tested** (`spool` driver; delivery drivers are private) |
 | `filesystem`, `xmanager` | Names reserved only |
 | Orchestrator `jetty-orc` ([`docs/orchestrator.md`](docs/orchestrator.md)) — companion tool, not a module | **Implemented, tested** |
 
