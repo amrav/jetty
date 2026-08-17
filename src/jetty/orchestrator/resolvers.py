@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from .config import ResolverConfig
+from .console import LineBuffer
 
 _OUTPUT_LIMIT = 1 << 20  # a resolver that prints a megabyte is broken
 _STDERR_TAIL = 2000
@@ -251,16 +252,19 @@ class Resolvers:
                 self.state[rname]["copied_from"] = sources
             return binaries
 
-    def _log_lines(self, rname: str, lines: list[str]) -> None:
-        data = "\n".join(lines) + "\n"
+    def _emit(self, rname: str, line: str) -> None:
+        """One log line, delivered NOW — to the resolver's log file and the
+        console echo. Emission is per line, not per invocation, so a slow
+        resolver's progress chatter is visible while it runs, not replayed
+        after it exits."""
         if self._logs_dir is not None:
             try:
                 with open(self._logs_dir / f"resolver-{rname}.log", "a") as f:
-                    f.write(data)
+                    f.write(line + "\n")
             except OSError:
                 pass
         if self._echo is not None:
-            self._echo(rname, data.encode())
+            self._echo(rname, (line + "\n").encode())
 
     async def _run(
         self, rname: str, cfg: ResolverConfig
@@ -269,23 +273,22 @@ class Resolvers:
         fingerprints keyed by binary name)."""
         argv = self._argvs[rname]
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        lines = [f"=== jetty-orc resolve {stamp} :: {' '.join(argv)}"]
+        self._emit(rname, f"=== jetty-orc resolve {stamp} :: {' '.join(argv)}")
         try:
-            result = await self._run_exec(rname, cfg, argv, lines)
+            result = await self._run_exec(rname, cfg, argv)
         except ResolveError as e:
-            lines.append(f"jetty-orc: {e}")
-            self._log_lines(rname, lines)
+            self._emit(rname, f"jetty-orc: {e}")
             raise
         binaries = result[0]
-        lines.append(
+        self._emit(
+            rname,
             "jetty-orc: resolved "
-            + " ".join(f"{k}={v}" for k, v in binaries.items())
+            + " ".join(f"{k}={v}" for k, v in binaries.items()),
         )
-        self._log_lines(rname, lines)
         return result
 
     async def _run_exec(
-        self, rname: str, cfg: ResolverConfig, argv: list[str], lines: list[str]
+        self, rname: str, cfg: ResolverConfig, argv: list[str]
     ) -> tuple[dict[str, str], dict[str, str] | None, dict[str, str]]:
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -297,21 +300,59 @@ class Resolvers:
             )
         except OSError as e:
             raise ResolveError(f"resolver {rname!r}: cannot run {argv[0]!r}: {e}")
+
+        # stderr streams line by line as it arrives (progress chatter from a
+        # slow release fetch is visible live); stdout is the output CONTRACT
+        # (name=path lines) and is collected whole for parsing. The tail of
+        # stderr is also kept for failure attribution.
+        stderr_tail = bytearray()
+
+        async def pump_stderr() -> None:
+            buf = LineBuffer()
+            while True:
+                chunk = await proc.stderr.read(8192)
+                if not chunk:
+                    break
+                stderr_tail.extend(chunk)
+                del stderr_tail[: -2 * _STDERR_TAIL]
+                for line in buf.feed(chunk):
+                    self._emit(rname, line)
+            partial = buf.flush()
+            if partial:
+                self._emit(rname, partial)
+
+        async def read_stdout() -> bytes:
+            # read(n) returns on the FIRST available chunk, not at EOF —
+            # drain explicitly, capped (a resolver that prints a megabyte is
+            # broken, and an uncapped read of one would fill memory).
+            data = bytearray()
+            while len(data) < _OUTPUT_LIMIT:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+            return bytes(data)
+
+        stdout_task = asyncio.create_task(read_stdout())
+        stderr_task = asyncio.create_task(pump_stderr())
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), cfg.timeout_seconds
-            )
+            await asyncio.wait_for(proc.wait(), cfg.timeout_seconds)
         except TimeoutError:
             proc.kill()
             await proc.wait()
+            for task in (stdout_task, stderr_task):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             raise ResolveError(
                 f"resolver {rname!r} timed out after {cfg.timeout_seconds}s"
             )
-        stderr_text = stderr.decode(errors="replace").strip()
-        if stderr_text:
-            lines.append(stderr_text)
+        stdout = await stdout_task
+        await stderr_task
         if proc.returncode != 0:
-            tail = stderr_text[-_STDERR_TAIL:]
+            tail = stderr_tail.decode(errors="replace").strip()[-_STDERR_TAIL:]
             raise ResolveError(
                 f"resolver {rname!r} exited {proc.returncode}"
                 + (f"; stderr: {tail}" if tail else "")

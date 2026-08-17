@@ -896,6 +896,57 @@ backoff_initial_seconds = 0.05
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_resolver_stderr_streams_while_it_runs(self):
+        """A slow resolver's progress chatter must reach the log AS IT
+        HAPPENS, not be replayed after exit: assert 'fetching' is visible
+        while the script is still sleeping (its 'resolved' line absent)."""
+        app = os.path.join(self.workdir.full_path, "app")
+        with open(app, "w") as f:
+            f.write(f"#!{sys.executable}\nimport time\ntime.sleep(300)\n")
+        os.chmod(app, 0o755)
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["sh", "-c", "echo fetching release... >&2; sleep 3; echo {app}"]
+timeout_seconds = 30
+
+[services.app]
+cmd = ["{{bin.app}}"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+
+        def resolver_log() -> str:
+            record = self.record()
+            if not record or not record.get("logs_dir"):
+                return ""
+            try:
+                with open(os.path.join(record["logs_dir"], "resolver-app.log")) as f:
+                    return f.read()
+            except OSError:
+                return ""
+
+        log = self.wait_until(
+            lambda: ("fetching release..." in resolver_log()) and resolver_log(),
+            proc,
+            what="stderr streamed before the resolver finished",
+        )
+        self.assertNotIn(
+            "jetty-orc: resolved",
+            log,
+            "stderr arrived only with the final result — it was buffered",
+        )
+        self.wait_until(
+            lambda: self.service_state("app") == "running", proc, what="running"
+        )
+        self.assertIn("jetty-orc: resolved", resolver_log())
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_resolver_failure_is_a_spawn_failure_with_stderr(self):
         config = self.write_config(
             f"""
