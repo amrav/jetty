@@ -89,3 +89,28 @@ enabled = true
 #   space = "sandbox"
 #   sender = "users/operator"
 #   text = "hello from the seed"
+
+# Emulated Google Issue Tracker API over a pluggable driver
+# (spec/issuetracker-v1.md — experimental). Clients written against
+# issuetracker.googleapis.com reach it by pointing their base URL at this
+# sidecar plus /issuetracker.
+#
+#   [modules.issuetracker]
+#   enabled = true
+#   driver = "mock"
+#   # The service identity mutations are attributed to (§3).
+#   identity = "jetty@example.com"
+#
+#   # Mock driver seeding: components and the issues that exist at boot.
+#   [[modules.issuetracker.seed.components]]
+#   component_id = 100
+#   name = "widget"                  # config sugar; not on the wire
+#
+#   [[modules.issuetracker.seed.issues]]
+#   component_id = 100
+#   title = "Crash on save"
+#   status = "NEW"                   # NEW | ASSIGNED | ACCEPTED | FIXED | ...
+#   priority = "P1"                  # P0..P4
+#   severity = "S2"                  # S0..S4
+#   assignee = "ada@example.com"
+#   description = "steps to reproduce ..."
