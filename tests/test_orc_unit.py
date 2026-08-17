@@ -79,6 +79,18 @@ after = ["a"]
                 '[ports]\na = 8000\nb = 8000\n' + MINIMAL
             )
 
+    def test_duplicate_fixed_port_rejected_across_spec_forms(self):
+        # The digit-string form (what env substitution produces) and the
+        # single-port range pin a port just as hard as the integer form.
+        for b in ('"8000"', '"8000-8000"'):
+            with self.assertRaisesRegex(Exception, "both fixed", msg=b):
+                config_from(f'[ports]\na = 8000\nb = {b}\n' + MINIMAL)
+
+    def test_env_rendered_duplicate_caught_at_allocation(self):
+        free = allocate_ports({"x": "auto"})["x"]
+        with self.assertRaisesRegex(PortError, "both resolve to fixed port"):
+            allocate_ports({"a": str(free), "b": str(free)})
+
     def test_port_spec_forms(self):
         cfg = config_from(
             '[ports]\na = "auto"\nb = 8000\nc = "8000+"\nd = "9000-9020"\n'

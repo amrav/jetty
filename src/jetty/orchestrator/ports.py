@@ -44,9 +44,21 @@ def _try_bind(port: int) -> socket.socket | None:
 def allocate_ports(spec: dict[str, int | str]) -> dict[str, int]:
     allocated: dict[str, int] = {}
     holds: list[socket.socket] = []
+    fixed: dict[int, str] = {}
     try:
         for name, want in spec.items():
             parsed = parse_port_spec(want)
+            # Config validation catches literal duplicates, but env-rendered
+            # specs can only collide HERE — and the bind failure they'd
+            # produce reads as "someone else holds this port" when the
+            # someone is our own probe socket. Name the real problem.
+            if parsed != "auto" and parsed[0] == parsed[1]:
+                if parsed[0] in fixed:
+                    raise PortError(
+                        f"ports.{name} and ports.{fixed[parsed[0]]} both "
+                        f"resolve to fixed port {parsed[0]}"
+                    )
+                fixed[parsed[0]] = name
             if parsed == "auto":
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 holds.append(sock)
