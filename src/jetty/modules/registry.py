@@ -106,6 +106,13 @@ def _register_builtins() -> None:
 
     register("mail", _mail)
 
+    def _issuetracker(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.issuetracker.module import IssueTrackerModule
+
+        return IssueTrackerModule(settings)
+
+    register("issuetracker", _issuetracker)
+
     # `auth` and `llmproxy` are specified in spec/ and not yet implemented.
     # They are deliberately NOT registered: naming them here before they exist
     # would let `enabled = true` boot a sidecar that answers auth questions
