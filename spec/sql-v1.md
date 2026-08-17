@@ -1,5 +1,11 @@
 # Jetty module: `sql` — v1
 
+**Status: experimental.** This specification is subject to breaking changes
+without warning: endpoints, wire shapes, error codes, and the dialect rules
+may all change while the `v1` path segment stays where it is. SPEC.md §6's
+freeze applies to a *published* `api_version`, and this one is not published
+yet. Do not build against it anything you are unwilling to update.
+
 Mount: `/sql/v1` on the control listener
 Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
