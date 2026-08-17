@@ -24,6 +24,7 @@ from jetty.orchestrator.registry import Registry, supervisor_alive  # noqa: E402
 from jetty.orchestrator.render import (  # noqa: E402
     RenderError,
     build_context,
+    render_service,
     render_str,
     validate_templates,
 )  # resolve_config_path/resolve_command imported inside their tests
@@ -72,6 +73,19 @@ after = ["a"]
     def test_unknown_gate_rejected(self):
         with self.assertRaisesRegex(Exception, "unknown gate"):
             config_from(MINIMAL + 'requires = ["creds"]\n')
+
+    def test_ready_uds_parses(self):
+        cfg = config_from(
+            MINIMAL + '\n[services.api.ready]\nuds = "{state_dir}/api.sock"\n'
+        )
+        self.assertEqual(cfg.services["api"].ready.uds, "{state_dir}/api.sock")
+
+    def test_ready_probes_are_exclusive(self):
+        with self.assertRaisesRegex(Exception, "at most one of http/tcp/uds/path"):
+            config_from(
+                MINIMAL
+                + '\n[services.api.ready]\nuds = "/x.sock"\ntcp = "127.0.0.1:80"\n'
+            )
 
     def test_duplicate_fixed_port_rejected(self):
         with self.assertRaisesRegex(Exception, "both fixed"):
@@ -226,6 +240,24 @@ class RenderTest(absltest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "ports.nope"):
             validate_templates(cfg, self.create_tempdir().full_path)
+
+    def test_ready_uds_renders_against_state_dir(self):
+        cfg = config_from(
+            MINIMAL + '\n[services.api.ready]\nuds = "{state_dir}/api.sock"\n'
+        )
+        ctx = build_context("dev", {}, "/state", "/logs")
+        rendered = render_service(
+            cfg.services["api"], ctx, self.create_tempdir().full_path
+        )
+        self.assertEqual(rendered.ready_uds, "/state/api.sock")
+
+    def test_ready_uds_over_sun_path_cap_rejected(self):
+        cfg = config_from(
+            MINIMAL + '\n[services.api.ready]\nuds = "{state_dir}/api.sock"\n'
+        )
+        ctx = build_context("dev", {}, "/s" * 60, "/logs")
+        with self.assertRaisesRegex(RenderError, "sun_path"):
+            render_service(cfg.services["api"], ctx, self.create_tempdir().full_path)
 
 
 class EnvSubstitutionTest(absltest.TestCase):

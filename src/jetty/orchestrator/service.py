@@ -354,7 +354,12 @@ class Service:
     async def _wait_ready(self) -> bool:
         r = self._rendered
         assert r is not None  # set by the _spawn that preceded us
-        if r.ready_http is None and r.ready_tcp is None and r.ready_path is None:
+        if (
+            r.ready_http is None
+            and r.ready_tcp is None
+            and r.ready_uds is None
+            and r.ready_path is None
+        ):
             return True
         assert self.proc is not None
         ready_cfg = self._cfg.ready
@@ -378,6 +383,8 @@ class Service:
         try:
             if r.ready_path is not None:
                 return os.path.exists(r.ready_path)
+            if r.ready_uds is not None:
+                return await self._uds_connect_ok(r.ready_uds)
             if r.ready_tcp is not None:
                 host, _, port = r.ready_tcp.rpartition(":")
                 return await self._connect_ok(host.strip("[]"), int(port), None)
@@ -389,6 +396,24 @@ class Service:
             return await self._connect_ok(u.hostname, u.port or 80, path)
         except (OSError, ValueError):
             return False
+
+    @staticmethod
+    async def _uds_connect_ok(path: str) -> bool:
+        # connect() distinguishes a live listener from a stale socket file
+        # (ECONNREFUSED) or a plain file (ENOTSOCK), which a bare existence
+        # check cannot.
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(path), _PROBE_ATTEMPT_TIMEOUT
+            )
+        except (OSError, TimeoutError):
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return True
 
     @staticmethod
     async def _connect_ok(host: str, port: int, http_path: str | None) -> bool:
