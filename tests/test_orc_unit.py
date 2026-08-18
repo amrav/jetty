@@ -21,6 +21,7 @@ from jetty.orchestrator import procfs  # noqa: E402
 from jetty.orchestrator.config import OrchestratorConfig, start_order  # noqa: E402
 from jetty.orchestrator.ports import PortError, allocate_ports  # noqa: E402
 from jetty.orchestrator.registry import Registry, supervisor_alive  # noqa: E402
+from jetty.orchestrator.service import _stat_sig  # noqa: E402
 from jetty.orchestrator.render import (  # noqa: E402
     RenderError,
     build_context,
@@ -730,6 +731,114 @@ class RegistryTest(absltest.TestCase):
         reg.remove("dev")
         self.assertIsNone(reg.load("dev"))
 
+
+class WatchSignatureTest(absltest.TestCase):
+    """`watch` change detection (service._stat_sig).
+
+    A watched path is often a directory — a source tree or a build output
+    dir. A directory's own mtime moves only when its entries are added,
+    removed or renamed, so a shallow stat cannot see a file being edited in
+    place, and sees nothing at all below the first level."""
+
+    def setUp(self):
+        super().setUp()
+        self.dir = self.create_tempdir().full_path
+
+    def write(self, rel: str, text: str) -> str:
+        path = os.path.join(self.dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_file_signature_tracks_content_and_absence(self):
+        path = self.write("app.bin", "one")
+        first = _stat_sig(path)
+        self.assertIsNotNone(first)
+        self.assertEqual(_stat_sig(path), first)  # stable while untouched
+        self.write("app.bin", "two!")
+        self.assertNotEqual(_stat_sig(path), first)
+        os.unlink(path)
+        self.assertIsNone(_stat_sig(path))
+
+    def test_missing_path_has_no_signature(self):
+        self.assertIsNone(_stat_sig(os.path.join(self.dir, "nope")))
+
+    def test_directory_signature_is_stable_while_untouched(self):
+        self.write("src/a.py", "a")
+        self.write("src/nested/b.py", "b")
+        root = os.path.join(self.dir, "src")
+        self.assertEqual(_stat_sig(root), _stat_sig(root))
+
+    def test_directory_signature_sees_a_file_edited_in_place(self):
+        self.write("src/a.py", "a")
+        root = os.path.join(self.dir, "src")
+        before = _stat_sig(root)
+        self.write("src/a.py", "a changed")
+        self.assertNotEqual(_stat_sig(root), before)
+
+    def test_directory_signature_sees_edits_below_the_top_level(self):
+        self.write("src/nested/deep/b.py", "b")
+        root = os.path.join(self.dir, "src")
+        before = _stat_sig(root)
+        self.write("src/nested/deep/b.py", "b changed")
+        self.assertNotEqual(_stat_sig(root), before)
+
+    def test_directory_signature_sees_additions_removals_and_renames(self):
+        self.write("src/a.py", "a")
+        root = os.path.join(self.dir, "src")
+
+        before = _stat_sig(root)
+        added = self.write("src/nested/c.py", "c")
+        self.assertNotEqual(_stat_sig(root), before)
+
+        before = _stat_sig(root)
+        os.rename(added, os.path.join(os.path.dirname(added), "renamed.py"))
+        self.assertNotEqual(_stat_sig(root), before)
+
+        before = _stat_sig(root)
+        os.unlink(os.path.join(os.path.dirname(added), "renamed.py"))
+        self.assertNotEqual(_stat_sig(root), before)
+
+    def test_empty_directory_signature_is_not_absence(self):
+        root = os.path.join(self.dir, "empty")
+        os.makedirs(root)
+        self.assertIsNotNone(_stat_sig(root))  # empty != missing
+        before = _stat_sig(root)
+        os.makedirs(os.path.join(root, "sub"))
+        self.assertNotEqual(_stat_sig(root), before)  # an empty subdir counts
+
+    def test_directory_walk_does_not_follow_symlinked_subtrees(self):
+        """A symlink to a tree is identity, not contents: following one
+        invites cycles and makes a watch silently span the filesystem."""
+        self.write("src/a.py", "a")
+        self.write("outside/big.py", "big")
+        os.symlink(os.path.join(self.dir, "outside"), os.path.join(self.dir, "src", "link"))
+        root = os.path.join(self.dir, "src")
+        before = _stat_sig(root)
+        self.write("outside/big.py", "big changed")
+        self.assertEqual(_stat_sig(root), before)
+
+
+class WatchConfigTest(absltest.TestCase):
+    def test_watch_accepts_home_paths(self):
+        """`~/x` and `{home}/x` are the two ways to spell a path in the home
+        directory; both resolve absolutely, neither is config-relative."""
+        home = os.path.expanduser("~")
+        cfg = config_from(
+            MINIMAL
+            + '\n[services.web]\ncmd = ["true"]\n'
+            + 'watch = ["~/dist/web", "{home}/dist/other"]\n'
+        )
+        rendered = render_service(
+            cfg.services["web"],
+            build_context("dev", {}, "/dev/null", "/dev/null"),
+            "/cfgdir",
+        )
+        self.assertEqual(
+            rendered.watch,
+            [os.path.join(home, "dist/web"), os.path.join(home, "dist/other")],
+        )
 
 class WatchConfigTest(absltest.TestCase):
     def test_watch_parses_and_renders_config_relative(self):

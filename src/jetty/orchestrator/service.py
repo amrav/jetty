@@ -19,8 +19,10 @@ needs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import signal
+import stat
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -39,15 +41,71 @@ _PROBE_ATTEMPT_TIMEOUT = 2.0
 _WATCH_POLL_SECONDS = 1.0
 
 
-def _stat_sig(path: str) -> tuple[int, int, int] | None:
-    """A file's change signature: (inode, size, mtime_ns), None if absent.
-    Inode included so an atomic `mv` over the path — same size, coarse
-    mtime — still reads as a change."""
+#: A watched tree wider than this polls a lot of inodes every second; the
+#: watcher says so once rather than quietly costing the dev loop.
+_WATCH_WIDE_TREE = 10_000
+
+Signature = tuple[int, int, int] | tuple[str, str]
+
+
+def _path_sig(path: str) -> tuple[Signature | None, int]:
+    """A watched path's change signature and the number of files behind it.
+    None when the path is missing (the caller treats that as "mid-rebuild",
+    not as a change).
+
+    A file's signature is (inode, size, mtime_ns) — inode included so an
+    atomic `mv` over the path, same size and coarse mtime, still reads as a
+    change.
+
+    A **directory's** covers its whole subtree. Its own mtime moves only when
+    its entries are added, removed or renamed, so a shallow stat cannot see
+    the ordinary case — a source file edited in place — and sees nothing at
+    all below the first level. Directory names are folded in too, so a new
+    empty directory counts.
+
+    Symlinked directories are recorded by name and not descended into: a
+    link is identity, not contents, and following one invites both cycles
+    and a watch that silently spans the filesystem. A symlink to a *file*
+    resolves, so watching a `current -> build-123` artifact works.
+    """
     try:
         st = os.stat(path)
     except OSError:
-        return None
-    return (st.st_ino, st.st_size, st.st_mtime_ns)
+        return None, 0
+    if not stat.S_ISDIR(st.st_mode):
+        return (st.st_ino, st.st_size, st.st_mtime_ns), 1
+
+    digest = hashlib.blake2b(digest_size=16)
+    files = 0
+    for root, dirs, names in os.walk(path, followlinks=False):
+        # sorted so the signature depends on the tree, not on readdir order
+        dirs.sort()
+        names.sort()
+        digest.update(os.fsencode(os.path.relpath(root, path)))
+        for name in dirs:
+            digest.update(b"\0d" + os.fsencode(name))
+        for name in names:
+            files += 1
+            full = os.path.join(root, name)
+            try:
+                est = os.stat(full)
+            except OSError:
+                try:  # a broken symlink still has an identity of its own
+                    est = os.lstat(full)
+                except OSError:  # vanished mid-walk: next poll settles it
+                    digest.update(b"\0?" + os.fsencode(name))
+                    continue
+            digest.update(
+                b"\0f"
+                + os.fsencode(name)
+                + f"{est.st_ino}:{est.st_size}:{est.st_mtime_ns}".encode()
+            )
+    return ("tree", digest.hexdigest()), files
+
+
+def _stat_sig(path: str) -> Signature | None:
+    """`_path_sig` without the file count."""
+    return _path_sig(path)[0]
 
 
 class Service:
@@ -521,7 +579,15 @@ class Service:
         The respawn re-renders, so a `{bin.*}` watch path follows whatever
         the resolver says next."""
         paths = self._rendered.watch
-        baseline = {p: _stat_sig(p) for p in paths}
+        scanned = {p: _path_sig(p) for p in paths}
+        baseline = {p: sig for p, (sig, _) in scanned.items()}
+        wide = sum(files for _, files in scanned.values())
+        if wide > _WATCH_WIDE_TREE:
+            self._log_note(
+                f"watching {wide} files across {len(paths)} path(s); every poll "
+                f"stats all of them — watch the build output rather than a whole "
+                "source tree if the dev loop feels heavy"
+            )
         previous = dict(baseline)
         while True:
             await asyncio.sleep(_WATCH_POLL_SECONDS)

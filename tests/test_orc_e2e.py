@@ -1209,5 +1209,72 @@ max_restarts = 0
         self.assertIn("watched path(s) changed (app.bin)", output)
 
 
+    def test_watched_directory_relaunches_on_an_edit_inside_it(self):
+        """The common dev-loop shape: watch a source or output *directory*.
+        A directory's own mtime moves only on add/remove/rename, so an edit
+        in place — and anything below the first level — is only visible to a
+        walk of the subtree."""
+        srcdir = os.path.join(self.workdir.full_path, "src")
+        os.makedirs(os.path.join(srcdir, "nested"))
+        deep = os.path.join(srcdir, "nested", "app.py")
+        with open(deep, "w") as f:
+            f.write("# release one")
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.sleeper]
+cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
+watch = ["{srcdir}"]
+[services.sleeper.restart]
+max_restarts = 0
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("sleeper") == "running",
+            proc,
+            what="sleeper running",
+        )
+        first_pid = self.record()["services"]["sleeper"]["pid"]
+
+        # An edit in place, two levels down: the case a shallow stat misses.
+        with open(deep, "w") as f:
+            f.write("# release two")
+        self.wait_until(
+            lambda: (
+                self.service_state("sleeper") == "running"
+                and self.record()["services"]["sleeper"]["pid"] not in (None, first_pid)
+            ),
+            proc,
+            what="sleeper relaunched on an edit inside the watched directory",
+        )
+        # A rebuild is nobody's crash: max_restarts = 0 means any budgeted
+        # restart would have failed the instance.
+        self.assertEqual(self.record()["services"]["sleeper"]["restarts"], 0)
+
+        second_pid = self.record()["services"]["sleeper"]["pid"]
+        # A new file appearing in the tree counts too.
+        with open(os.path.join(srcdir, "nested", "helper.py"), "w") as f:
+            f.write("# added")
+        self.wait_until(
+            lambda: (
+                self.service_state("sleeper") == "running"
+                and self.record()["services"]["sleeper"]["pid"]
+                not in (None, first_pid, second_pid)
+            ),
+            proc,
+            what="sleeper relaunched on a file added to the watched directory",
+        )
+
+        proc.send_signal(signal.SIGINT)
+        code = proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
+        output = self.output_of(proc)
+        self.assertEqual(code, 0, output)
+        self.assertIn("watched path(s) changed (src)", output)
+
+
 if __name__ == "__main__":
     absltest.main()
