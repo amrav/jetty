@@ -54,6 +54,11 @@ cmd = ["python", "-m", "my_backend", "--port", "{ports.backend}"]
 cwd = "/path/to/backend"
 requires = ["creds"]
 env = { BACKEND_PORT = "{ports.backend}" }
+#watch = ["/path/to/backend/dist/backend"]
+                      # relaunch this service when a watched file changes
+                      # (settles first; budget-free). Typically the binary it
+                      # runs — {bin.<name>} works here — for edit-build-run
+                      # loops without touching the rest of the instance.
 [services.backend.ready]
 http = "http://127.0.0.1:{ports.backend}/healthz"
 

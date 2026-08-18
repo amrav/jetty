@@ -323,6 +323,10 @@ class ServiceConfig:
     ready: ReadyConfig = dataclasses.field(default_factory=ReadyConfig)
     restart: RestartConfig = dataclasses.field(default_factory=RestartConfig)
     stop: StopConfig = dataclasses.field(default_factory=StopConfig)
+    #: Paths polled while the service runs; a settled change relaunches it
+    #: (budget-free — a rebuild is nobody's crash). Typically the service's
+    #: own binary: `watch = ["{bin.backend}"]` or a locally-built artifact.
+    watch: list[str] = dataclasses.field(default_factory=list)
 
     @classmethod
     def parse(cls, raw: object, where: str) -> "ServiceConfig":
@@ -333,6 +337,7 @@ class ServiceConfig:
             env=t.take_str_dict("env"),
             after=t.take_str_list("after"),
             requires=t.take_str_list("requires"),
+            watch=t.take_str_list("watch"),
             ready=ReadyConfig.parse(t.take_table("ready"), t.at("ready")),
             restart=RestartConfig.parse(t.take_table("restart"), t.at("restart")),
             stop=StopConfig.parse(t.take_table("stop"), t.at("stop")),
@@ -588,6 +593,7 @@ def service_bin_refs(svc: ServiceConfig) -> set[str]:
     return bin_refs(
         [
             *svc.cmd,
+            *svc.watch,
             *svc.env.values(),
             svc.cwd or "",
             svc.ready.http or "",

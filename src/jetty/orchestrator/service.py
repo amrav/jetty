@@ -36,6 +36,18 @@ from .resolvers import ResolveError
 
 _TAIL_BYTES = 8192
 _PROBE_ATTEMPT_TIMEOUT = 2.0
+_WATCH_POLL_SECONDS = 1.0
+
+
+def _stat_sig(path: str) -> tuple[int, int, int] | None:
+    """A file's change signature: (inode, size, mtime_ns), None if absent.
+    Inode included so an atomic `mv` over the path — same size, coarse
+    mtime — still reads as a change."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
 
 
 class Service:
@@ -243,18 +255,19 @@ class Service:
         if err is not None:
             return 127
         assert self.proc is not None
-        watcher = (
-            asyncio.create_task(self._watch_continuous_gates())
-            if self._continuous_requires
-            else None
-        )
+        assert self._rendered is not None
+        watchers = []
+        if self._continuous_requires:
+            watchers.append(asyncio.create_task(self._watch_continuous_gates()))
+        if self._rendered.watch:
+            watchers.append(asyncio.create_task(self._watch_paths()))
         try:
             if await self._wait_ready():
                 self._set_state("running")
                 self.ready_event.set()
             code = await self.proc.wait()
         finally:
-            if watcher is not None:
+            for watcher in watchers:
                 watcher.cancel()
                 try:
                     await watcher
@@ -486,6 +499,45 @@ class Service:
                 f"continuous gate(s) {', '.join(closed)} closed "
                 f"({max(streaks[n] for n in closed)} consecutive failed checks); "
                 "stopping until they reopen"
+            )
+            await self._terminate_group()
+            self._containment.sweep(self.name, signal.SIGKILL)
+            return
+
+    async def _watch_paths(self) -> None:
+        """Runs beside a live incarnation: polls the rendered `watch` paths
+        and relaunches the service when one changes — the dev loop's half of
+        what resolvers do for releases (an in-place rebuild moves no resolver
+        generation, so nothing else would notice it).
+
+        The relaunch goes through the bounce flag: no exit classification, no
+        budget, no backoff — a rebuild is nobody's crash, and burning budget
+        on it would turn an afternoon of edits into an instance failure.
+
+        Two guards against firing mid-rebuild: a change only counts once the
+        signature is IDENTICAL on two consecutive polls (a file still being
+        written moves between polls), and never while any watched path is
+        missing (`rm` then rebuild: the gap is the build, not the release).
+        The respawn re-renders, so a `{bin.*}` watch path follows whatever
+        the resolver says next."""
+        paths = self._rendered.watch
+        baseline = {p: _stat_sig(p) for p in paths}
+        previous = dict(baseline)
+        while True:
+            await asyncio.sleep(_WATCH_POLL_SECONDS)
+            if self.stopping or self.proc is None or self.proc.returncode is not None:
+                return
+            current = {p: _stat_sig(p) for p in paths}
+            changed = sorted(
+                os.path.basename(p) for p in paths if current[p] != baseline[p]
+            )
+            settled = all(current.values()) and current == previous
+            previous = current
+            if not changed or not settled:
+                continue
+            self._bounce_requested = True
+            self._log_note(
+                f"watched path(s) changed ({', '.join(changed)}); relaunching"
             )
             await self._terminate_group()
             self._containment.sweep(self.name, signal.SIGKILL)

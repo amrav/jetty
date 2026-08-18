@@ -384,6 +384,48 @@ copy_keep_days = 7.0
 
 `status` shows both the local path and the source it was copied from.
 
+## Watching binaries (`watch`)
+
+Resolvers cover releases: a *new path* is picked up at the next respawn. They
+cannot see an **in-place rebuild** — same path, new bytes — because nothing
+respawns and no resolver generation moves. `watch` covers that half, per
+service:
+
+```toml
+[services.backend]
+cmd = ["dist/backend", "--port", "{ports.backend}"]
+watch = ["dist/backend"]          # any paths; {bin.<name>} and {state_dir} work
+```
+
+While the service runs, the orchestrator polls each watched path (1s cadence,
+stat only). When one changes, the service is relaunched — **budget-free**: a
+rebuild is nobody's crash, so it spends no `max_restarts`, triggers no
+backoff, and cannot fail the instance. Everything else in the instance stays
+up; readiness ordering applies only at instance start, so dependents are not
+bounced.
+
+Two guards keep a half-written binary from being launched:
+
+- a change fires only once the file's signature (inode, size, mtime) is
+  **identical on two consecutive polls** — a file still being written keeps
+  moving;
+- nothing fires while any watched path is **missing** — an `rm` followed by a
+  rebuild reads as "build in progress", and the relaunch happens when the new
+  file lands and settles.
+
+So the worst-case latency from "build finished" to "new process" is about two
+polls, and an atomic `mv` over the path (the inode changes; write-then-rename
+build systems) is detected like any other change.
+
+`watch` composes with resolvers: `watch = ["{bin.backend}"]` polls whatever
+path the resolver last handed this incarnation, and the relaunch re-resolves —
+so it follows a release *and* notices the current release being rebuilt in
+place. Relative paths anchor to the config file's directory, confined to its
+subtree, like every other config path.
+
+Watching is per service and deliberately not a global mode: the service whose
+binary you are iterating on gets `watch`; the database next to it does not.
+
 ## Distribution
 
 The orchestrator package is **stdlib-only** (enforced by a test — a
