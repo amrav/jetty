@@ -114,3 +114,15 @@ enabled = true
 #   severity = "S2"                  # S0..S4
 #   assignee = "ada@example.com"
 #   description = "steps to reproduce ..."
+
+# Relational storage in the GoogleSQL ∩ SQLite wire dialect over a pluggable
+# driver (spec/sql-v1.md — experimental). Statements must be valid GoogleSQL
+# *and* run on the backing store, so an app developed here works unchanged
+# against an internal build's driver. This build ships the `sqlite` driver;
+# needs the `sql` extra (`pip install jetty[sql]`). `path` is machine-specific,
+# hence disabled here.
+#
+#   [modules.sql]
+#   enabled = true
+#   driver = "sqlite"
+#   path = "/var/lib/app/app.sqlite"

@@ -128,13 +128,13 @@ extends = "prod.toml"        # usual path rules: relative = this file's
                              # subtree, ~/absolute = anywhere
 
 [instance]
-name = "sf-dev"
+name = "app-dev"
 
 [ports]
 api = "8000+"                # replaces prod's fixed port
 
 [services.api.env]
-STARFLEET_DEMO = "1"         # tables deep-merge: only this key changes
+APP_DEMO_MODE = "1"          # tables deep-merge: only this key changes
 
 [services]
 metrics = false              # `false` deletes an inherited service
@@ -515,8 +515,8 @@ A record names its supervisor by pid **and** kernel start-ticks, so a
 recycled pid can't impersonate a live instance; zombies count as dead.
 `up` refuses an exact name whose record is still live (with the default
 random suffix that only happens under `--name`). `status`/`logs`/`kill`
-accept the base name when it matches exactly one instance (`logs sf-dev`
-finds `sf-dev-a3f1`); an ambiguous prefix is refused with the candidates
+accept the base name when it matches exactly one instance (`logs app-dev`
+finds `app-dev-a3f1`); an ambiguous prefix is refused with the candidates
 listed. `ls` reads records plus live
 cgroup//proc stats (CPU% is sampled over ~300 ms); `kill --force` performs a
 kernel-level kill from outside (`cgroup.kill` on the instance root, or a

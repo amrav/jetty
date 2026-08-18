@@ -280,6 +280,7 @@ Modules defined alongside this document:
 | `hg` | `spec/hg-v1.md` | Read-only view of the Mercurial repositories under a configured root |
 | `issuetracker` | `spec/issuetracker-v1.md` | Google Issue Tracker API subset over a pluggable driver |
 | `mail` | `spec/mail-v1.md` | Outbound mail relay over a pluggable driver |
+| `sql` | `spec/sql-v1.md` | Relational storage in the GoogleSQL ∩ SQLite dialect over a pluggable driver (experimental: breaking changes without warning) |
 
 `filesystem` and `xmanager` are reserved names with no specification yet.
 
