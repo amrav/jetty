@@ -76,7 +76,7 @@ def _self_argv() -> list[str]:
 
 def _resolve_instance(registry: Registry, query: str) -> dict:
     """Exact instance name, or an unambiguous base-name prefix — so
-    `jetty-orc logs sf-dev` finds `sf-dev-a3f1` when it's the only one."""
+    `jetty-orc logs app-dev` finds `app-dev-a3f1` when it's the only one."""
     record = registry.load(query)
     if record is not None:
         return record
