@@ -191,6 +191,7 @@ class RenderedService:
     ready_tcp: str | None
     ready_uds: str | None
     ready_path: str | None
+    watch: list[str] = dataclasses.field(default_factory=list)
 
 
 def render_service(
@@ -229,6 +230,10 @@ def render_service(
         ready_tcp=render_str(svc.ready.tcp, ctx) if svc.ready.tcp else None,
         ready_uds=ready_uds,
         ready_path=ready_path,
+        watch=[
+            resolve_config_path(render_str(w, ctx), config_dir, "watch")
+            for w in svc.watch
+        ],
     )
 
 

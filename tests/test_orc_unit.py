@@ -731,5 +731,48 @@ class RegistryTest(absltest.TestCase):
         self.assertIsNone(reg.load("dev"))
 
 
+class WatchConfigTest(absltest.TestCase):
+    def test_watch_parses_and_renders_config_relative(self):
+        cfg = config_from(MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["dist/web"]\n')
+        self.assertEqual(cfg.services["web"].watch, ["dist/web"])
+        rendered = render_service(
+            cfg.services["web"],
+            build_context("dev", {}, "/dev/null", "/dev/null"),
+            "/cfgdir",
+        )
+        self.assertEqual(rendered.watch, ["/cfgdir/dist/web"])
+
+    def test_watch_must_be_a_string_list(self):
+        with self.assertRaisesRegex(Exception, "watch"):
+            config_from(MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = 5\n')
+
+    def test_watch_bin_placeholder_requires_a_resolver(self):
+        with self.assertRaisesRegex(Exception, "bin.webbin"):
+            config_from(
+                MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["{bin.webbin}"]\n'
+            )
+
+    def test_watch_renders_placeholders_and_confines_relatives(self):
+        cfg = config_from(
+            MINIMAL
+            + '\n[services.web]\ncmd = ["true"]\nwatch = ["{state_dir}/web.bin"]\n'
+        )
+        rendered = render_service(
+            cfg.services["web"],
+            build_context("dev", {}, "/tmp/state", "/dev/null"),
+            "/cfgdir",
+        )
+        self.assertEqual(rendered.watch, ["/tmp/state/web.bin"])
+        escaping = config_from(
+            MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["../outside"]\n'
+        )
+        with self.assertRaisesRegex(RenderError, "outside"):
+            render_service(
+                escaping.services["web"],
+                build_context("dev", {}, "/dev/null", "/dev/null"),
+                "/cfgdir",
+            )
+
+
 if __name__ == "__main__":
     absltest.main()
