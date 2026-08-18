@@ -896,6 +896,57 @@ backoff_initial_seconds = 0.05
         proc.send_signal(signal.SIGINT)
         self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
 
+    def test_resolver_stderr_streams_while_it_runs(self):
+        """A slow resolver's progress chatter must reach the log AS IT
+        HAPPENS, not be replayed after exit: assert 'fetching' is visible
+        while the script is still sleeping (its 'resolved' line absent)."""
+        app = os.path.join(self.workdir.full_path, "app")
+        with open(app, "w") as f:
+            f.write(f"#!{sys.executable}\nimport time\ntime.sleep(300)\n")
+        os.chmod(app, 0o755)
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["sh", "-c", "echo fetching release... >&2; sleep 3; echo {app}"]
+timeout_seconds = 30
+
+[services.app]
+cmd = ["{{bin.app}}"]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+
+        def resolver_log() -> str:
+            record = self.record()
+            if not record or not record.get("logs_dir"):
+                return ""
+            try:
+                with open(os.path.join(record["logs_dir"], "resolver-app.log")) as f:
+                    return f.read()
+            except OSError:
+                return ""
+
+        log = self.wait_until(
+            lambda: ("fetching release..." in resolver_log()) and resolver_log(),
+            proc,
+            what="stderr streamed before the resolver finished",
+        )
+        self.assertNotIn(
+            "jetty-orc: resolved",
+            log,
+            "stderr arrived only with the final result — it was buffered",
+        )
+        self.wait_until(
+            lambda: self.service_state("app") == "running", proc, what="running"
+        )
+        self.assertIn("jetty-orc: resolved", resolver_log())
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=SHUTDOWN_TIMEOUT_S), 0, self.output_of(proc))
+
     def test_resolver_failure_is_a_spawn_failure_with_stderr(self):
         config = self.write_config(
             f"""
@@ -1105,6 +1156,57 @@ cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
 
         rc, output = self.orc_run("ls")
         self.assertIn("no instances", output)
+
+    def test_watched_path_change_relaunches_without_budget(self):
+        binary = os.path.join(self.workdir.full_path, "app.bin")
+        with open(binary, "w") as f:
+            f.write("release one")
+        config = self.write_config(
+            f"""
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.sleeper]
+cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
+watch = ["{binary}"]
+[services.sleeper.restart]
+max_restarts = 0
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        self.wait_until(
+            lambda: self.service_state("sleeper") == "running",
+            proc,
+            what="sleeper running",
+        )
+        first_pid = self.record()["services"]["sleeper"]["pid"]
+
+        # A missing watched path is a build in progress, not a change: the
+        # incarnation must ride it out (2.5s spans two 1s polls).
+        os.unlink(binary)
+        time.sleep(2.5)
+        self.assertEqual(self.record()["services"]["sleeper"]["pid"], first_pid)
+
+        # The new file landing (and settling) is the change.
+        with open(binary, "w") as f:
+            f.write("release two")
+        self.wait_until(
+            lambda: (
+                self.service_state("sleeper") == "running"
+                and self.record()["services"]["sleeper"]["pid"] not in (None, first_pid)
+            ),
+            proc,
+            what="sleeper relaunched on watched change",
+        )
+        # max_restarts = 0: any budgeted restart would have failed the
+        # instance, so surviving IS the budget assertion; restarts stays 0.
+        self.assertEqual(self.record()["services"]["sleeper"]["restarts"], 0)
+        proc.send_signal(signal.SIGINT)
+        code = proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
+        output = self.output_of(proc)
+        self.assertEqual(code, 0, output)
+        self.assertIn("watched path(s) changed (app.bin)", output)
 
 
 if __name__ == "__main__":

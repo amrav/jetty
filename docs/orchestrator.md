@@ -128,13 +128,13 @@ extends = "prod.toml"        # usual path rules: relative = this file's
                              # subtree, ~/absolute = anywhere
 
 [instance]
-name = "sf-dev"
+name = "app-dev"
 
 [ports]
 api = "8000+"                # replaces prod's fixed port
 
 [services.api.env]
-STARFLEET_DEMO = "1"         # tables deep-merge: only this key changes
+APP_DEMO_MODE = "1"          # tables deep-merge: only this key changes
 
 [services]
 metrics = false              # `false` deletes an inherited service
@@ -288,9 +288,11 @@ deleted — prune them yourself). Append-only, stdout+stderr merged, with
 orchestrator annotations (spawn headers, restart/gate notes) inline;
 restarts within a run append under a fresh spawn header. The last ~8 KiB
 travels with failure reports. Resolver invocations get the same treatment —
-`resolver-<name>.log` beside the service logs (header, the script's stderr,
-and the resolved result or failure), included in `logs` and the `up`
-console; cache hits run nothing and log nothing.
+`resolver-<name>.log` beside the service logs (header, the script's stderr
+**streamed line by line as it runs** — a slow release fetch's progress is
+visible live, not replayed after exit — and the resolved result or
+failure), included in `logs` and the `up` console; cache hits run nothing
+and log nothing.
 
 ## Dynamic binaries (resolvers)
 
@@ -381,6 +383,48 @@ copy_keep_days = 7.0
   expire; last month's releases do.
 
 `status` shows both the local path and the source it was copied from.
+
+## Watching binaries (`watch`)
+
+Resolvers cover releases: a *new path* is picked up at the next respawn. They
+cannot see an **in-place rebuild** — same path, new bytes — because nothing
+respawns and no resolver generation moves. `watch` covers that half, per
+service:
+
+```toml
+[services.backend]
+cmd = ["dist/backend", "--port", "{ports.backend}"]
+watch = ["dist/backend"]          # any paths; {bin.<name>} and {state_dir} work
+```
+
+While the service runs, the orchestrator polls each watched path (1s cadence,
+stat only). When one changes, the service is relaunched — **budget-free**: a
+rebuild is nobody's crash, so it spends no `max_restarts`, triggers no
+backoff, and cannot fail the instance. Everything else in the instance stays
+up; readiness ordering applies only at instance start, so dependents are not
+bounced.
+
+Two guards keep a half-written binary from being launched:
+
+- a change fires only once the file's signature (inode, size, mtime) is
+  **identical on two consecutive polls** — a file still being written keeps
+  moving;
+- nothing fires while any watched path is **missing** — an `rm` followed by a
+  rebuild reads as "build in progress", and the relaunch happens when the new
+  file lands and settles.
+
+So the worst-case latency from "build finished" to "new process" is about two
+polls, and an atomic `mv` over the path (the inode changes; write-then-rename
+build systems) is detected like any other change.
+
+`watch` composes with resolvers: `watch = ["{bin.backend}"]` polls whatever
+path the resolver last handed this incarnation, and the relaunch re-resolves —
+so it follows a release *and* notices the current release being rebuilt in
+place. Relative paths anchor to the config file's directory, confined to its
+subtree, like every other config path.
+
+Watching is per service and deliberately not a global mode: the service whose
+binary you are iterating on gets `watch`; the database next to it does not.
 
 ## Distribution
 

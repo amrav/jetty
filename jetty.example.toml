@@ -49,6 +49,24 @@ enabled = true
 #   listener = "127.0.0.1:7242"
 #   surfaces = ["openai", "anthropic", "gemini"]
 
+# Outbound mail relay (spec/mail-v1.md): accepts a fully-composed message on
+# POST /mail/v1/send and delivers it through a driver. This build ships the
+# `spool` driver (each accepted message becomes a JSON file — development, CI,
+# conformance); delivery drivers are private implementations.
+#
+#   [modules.mail]
+#   enabled = true
+#   driver = "spool"
+#   spool_dir = "/tmp/jetty/mail-spool"
+#   # The one permitted `from` (plus-addressing allowed) and the one
+#   # deliverable recipient domain; empty = unconstrained.
+#   sender = "relay-bot+notify@corp.example"
+#   domain = "corp.example"
+#   # Bearer required on /mail/v1/* when set (do set it on a TCP listener).
+#   token = ""
+#   # Force a failure mode for retry-path tests: "503" | "429" | "422".
+#   fail = ""
+
 # Google Chat API v1 subset over a pluggable driver. See spec/chat-v1.md.
 # This build ships the `mock` driver (in-memory, seedable — development, CI,
 # conformance); `passthrough` is specified but not yet implemented.
@@ -72,11 +90,37 @@ enabled = true
 #   sender = "users/operator"
 #   text = "hello from the seed"
 
+# Emulated Google Issue Tracker API over a pluggable driver
+# (spec/issuetracker-v1.md — experimental). Clients written against
+# issuetracker.googleapis.com reach it by pointing their base URL at this
+# sidecar plus /issuetracker.
+#
+#   [modules.issuetracker]
+#   enabled = true
+#   driver = "mock"
+#   # The service identity mutations are attributed to (§3).
+#   identity = "jetty@example.com"
+#
+#   # Mock driver seeding: components and the issues that exist at boot.
+#   [[modules.issuetracker.seed.components]]
+#   component_id = 100
+#   name = "widget"                  # config sugar; not on the wire
+#
+#   [[modules.issuetracker.seed.issues]]
+#   component_id = 100
+#   title = "Crash on save"
+#   status = "NEW"                   # NEW | ASSIGNED | ACCEPTED | FIXED | ...
+#   priority = "P1"                  # P0..P4
+#   severity = "S2"                  # S0..S4
+#   assignee = "ada@example.com"
+#   description = "steps to reproduce ..."
+
 # Relational storage in the GoogleSQL ∩ SQLite wire dialect over a pluggable
-# driver (spec/sql-v1.md). Statements must be valid GoogleSQL *and* run on the
-# backing store, so an app developed here works unchanged against an internal
-# build's driver. This build ships the `sqlite` driver; needs the `sql` extra
-# (`pip install jetty[sql]`). `path` is machine-specific, hence disabled here.
+# driver (spec/sql-v1.md — experimental). Statements must be valid GoogleSQL
+# *and* run on the backing store, so an app developed here works unchanged
+# against an internal build's driver. This build ships the `sqlite` driver;
+# needs the `sql` extra (`pip install jetty[sql]`). `path` is machine-specific,
+# hence disabled here.
 #
 #   [modules.sql]
 #   enabled = true

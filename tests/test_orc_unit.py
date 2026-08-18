@@ -93,6 +93,18 @@ after = ["a"]
                 '[ports]\na = 8000\nb = 8000\n' + MINIMAL
             )
 
+    def test_duplicate_fixed_port_rejected_across_spec_forms(self):
+        # The digit-string form (what env substitution produces) and the
+        # single-port range pin a port just as hard as the integer form.
+        for b in ('"8000"', '"8000-8000"'):
+            with self.assertRaisesRegex(Exception, "both fixed", msg=b):
+                config_from(f'[ports]\na = 8000\nb = {b}\n' + MINIMAL)
+
+    def test_env_rendered_duplicate_caught_at_allocation(self):
+        free = allocate_ports({"x": "auto"})["x"]
+        with self.assertRaisesRegex(PortError, "both resolve to fixed port"):
+            allocate_ports({"a": str(free), "b": str(free)})
+
     def test_port_spec_forms(self):
         cfg = config_from(
             '[ports]\na = "auto"\nb = 8000\nc = "8000+"\nd = "9000-9020"\n'
@@ -717,6 +729,49 @@ class RegistryTest(absltest.TestCase):
         self.assertFalse(supervisor_alive(loaded))
         reg.remove("dev")
         self.assertIsNone(reg.load("dev"))
+
+
+class WatchConfigTest(absltest.TestCase):
+    def test_watch_parses_and_renders_config_relative(self):
+        cfg = config_from(MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["dist/web"]\n')
+        self.assertEqual(cfg.services["web"].watch, ["dist/web"])
+        rendered = render_service(
+            cfg.services["web"],
+            build_context("dev", {}, "/dev/null", "/dev/null"),
+            "/cfgdir",
+        )
+        self.assertEqual(rendered.watch, ["/cfgdir/dist/web"])
+
+    def test_watch_must_be_a_string_list(self):
+        with self.assertRaisesRegex(Exception, "watch"):
+            config_from(MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = 5\n')
+
+    def test_watch_bin_placeholder_requires_a_resolver(self):
+        with self.assertRaisesRegex(Exception, "bin.webbin"):
+            config_from(
+                MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["{bin.webbin}"]\n'
+            )
+
+    def test_watch_renders_placeholders_and_confines_relatives(self):
+        cfg = config_from(
+            MINIMAL
+            + '\n[services.web]\ncmd = ["true"]\nwatch = ["{state_dir}/web.bin"]\n'
+        )
+        rendered = render_service(
+            cfg.services["web"],
+            build_context("dev", {}, "/tmp/state", "/dev/null"),
+            "/cfgdir",
+        )
+        self.assertEqual(rendered.watch, ["/tmp/state/web.bin"])
+        escaping = config_from(
+            MINIMAL + '\n[services.web]\ncmd = ["true"]\nwatch = ["../outside"]\n'
+        )
+        with self.assertRaisesRegex(RenderError, "outside"):
+            render_service(
+                escaping.services["web"],
+                build_context("dev", {}, "/dev/null", "/dev/null"),
+                "/cfgdir",
+            )
 
 
 if __name__ == "__main__":

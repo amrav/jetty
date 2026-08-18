@@ -323,6 +323,10 @@ class ServiceConfig:
     ready: ReadyConfig = dataclasses.field(default_factory=ReadyConfig)
     restart: RestartConfig = dataclasses.field(default_factory=RestartConfig)
     stop: StopConfig = dataclasses.field(default_factory=StopConfig)
+    #: Paths polled while the service runs; a settled change relaunches it
+    #: (budget-free — a rebuild is nobody's crash). Typically the service's
+    #: own binary: `watch = ["{bin.backend}"]` or a locally-built artifact.
+    watch: list[str] = dataclasses.field(default_factory=list)
 
     @classmethod
     def parse(cls, raw: object, where: str) -> "ServiceConfig":
@@ -333,6 +337,7 @@ class ServiceConfig:
             env=t.take_str_dict("env"),
             after=t.take_str_list("after"),
             requires=t.take_str_list("requires"),
+            watch=t.take_str_list("watch"),
             ready=ReadyConfig.parse(t.take_table("ready"), t.at("ready")),
             restart=RestartConfig.parse(t.take_table("restart"), t.at("restart")),
             stop=StopConfig.parse(t.take_table("stop"), t.at("stop")),
@@ -426,17 +431,22 @@ class OrchestratorConfig:
                 # form is validated at template-check time and again at
                 # launch, when the environment is actually consulted.
                 continue
-            if not isinstance(want, (int, str)) or parse_port_spec(want) is None:
+            parsed = parse_port_spec(want) if isinstance(want, (int, str)) else None
+            if parsed is None:
                 raise ConfigError(
                     f"ports.{name} = {want!r} is not a valid port spec "
                     '(want "auto", 8000, "8000+" or "8000-8020")'
                 )
-            if isinstance(want, int):
-                if want in fixed:
+            # Any spec that pins exactly one port counts as fixed for the
+            # duplicate check — the integer form, the digit-string form env
+            # substitution produces, and a single-port range alike.
+            if parsed != "auto" and parsed[0] == parsed[1]:
+                port = parsed[0]
+                if port in fixed:
                     raise ConfigError(
-                        f"ports.{name} and ports.{fixed[want]} both fixed to {want}"
+                        f"ports.{name} and ports.{fixed[port]} both fixed to {port}"
                     )
-                fixed[want] = name
+                fixed[port] = name
 
         provided: dict[str, str] = {}  # bin name -> resolver name
         for rname, resolver in self.resolvers.items():
@@ -583,6 +593,7 @@ def service_bin_refs(svc: ServiceConfig) -> set[str]:
     return bin_refs(
         [
             *svc.cmd,
+            *svc.watch,
             *svc.env.values(),
             svc.cwd or "",
             svc.ready.http or "",

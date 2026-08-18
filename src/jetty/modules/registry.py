@@ -99,6 +99,20 @@ def _register_builtins() -> None:
 
     register("hg", _hg)
 
+    def _mail(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.mail.module import MailModule
+
+        return MailModule(settings)
+
+    register("mail", _mail)
+
+    def _issuetracker(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.issuetracker.module import IssueTrackerModule
+
+        return IssueTrackerModule(settings)
+
+    register("issuetracker", _issuetracker)
+
     def _sql(settings: Mapping[str, Any]) -> Module:
         from jetty.modules.sql.module import SqlModule
 
