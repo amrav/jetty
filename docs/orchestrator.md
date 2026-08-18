@@ -384,7 +384,7 @@ copy_keep_days = 7.0
 
 `status` shows both the local path and the source it was copied from.
 
-## Watching binaries (`watch`)
+## Watching paths (`watch`)
 
 Resolvers cover releases: a *new path* is picked up at the next respawn. They
 cannot see an **in-place rebuild** — same path, new bytes — because nothing
@@ -395,6 +395,7 @@ service:
 [services.backend]
 cmd = ["dist/backend", "--port", "{ports.backend}"]
 watch = ["dist/backend"]          # any paths; {bin.<name>} and {state_dir} work
+# watch = ["src", "~/shared/proto", "{home}/dist"]   # directories and $HOME too
 ```
 
 While the service runs, the orchestrator polls each watched path (1s cadence,
@@ -403,6 +404,19 @@ rebuild is nobody's crash, so it spends no `max_restarts`, triggers no
 backoff, and cannot fail the instance. Everything else in the instance stays
 up; readiness ordering applies only at instance start, so dependents are not
 bounced.
+
+A watched **directory** covers its whole subtree — a file edited in place, a
+file added or removed, a rename, at any depth. (A directory's own mtime moves
+only when its immediate entries change, so nothing shallower would see the
+ordinary case of editing a source file.) Symlinked directories inside the tree
+are recorded by name and not descended into: a link is identity, not contents,
+and following one invites cycles and a watch that silently spans the
+filesystem. A symlink to a *file* resolves, so watching a
+`current -> build-123` artifact works.
+
+Every poll stats every file behind the watch, so watch the narrowest thing
+that answers "did my build change" — the output directory rather than the
+repository root. Past ten thousand files the service log says so once.
 
 Two guards keep a half-written binary from being launched:
 
@@ -421,7 +435,8 @@ build systems) is detected like any other change.
 path the resolver last handed this incarnation, and the relaunch re-resolves —
 so it follows a release *and* notices the current release being rebuilt in
 place. Relative paths anchor to the config file's directory, confined to its
-subtree, like every other config path.
+subtree, like every other config path; `~/x` and `{home}/x` both name a path
+in the home directory and count as absolute.
 
 Watching is per service and deliberately not a global mode: the service whose
 binary you are iterating on gets `watch`; the database next to it does not.
