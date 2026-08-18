@@ -297,8 +297,8 @@ class SqlModuleTest(absltest.TestCase):
     # --- boot behaviour --------------------------------------------------
 
     def test_unknown_driver_fails_at_boot(self):
-        with self.assertRaisesRegex(Exception, "corp.*not available"):
-            self.build(driver="corp")
+        with self.assertRaisesRegex(Exception, "internal.*not available"):
+            self.build(driver="internal")
 
     def test_missing_parent_directory_fails_at_boot(self):
         self.db_path = os.path.join(
