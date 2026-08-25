@@ -42,6 +42,28 @@ pd.read_csv("jetty://reports/q3.csv",
 Paths are relative to the module's configured root; the sidecar enforces
 containment (filesystem-v1 §3).
 
+## When the sidecar does not offer the module
+
+Jetty modules are opt-in, and the filesystem module — like every module —
+is disabled unless configured. By default this backend detects that with
+one `GET /v1/meta` probe per instance (the supported discovery path,
+SPEC.md §4.2) and falls back to the **normal local filesystem**: the same
+relative `jetty://` paths resolve against the working directory with plain
+`open(2)` semantics, and `gettmpdir()` becomes a `mkdtemp` under the
+working directory. Only file access degrades; the sidecar's other modules
+(e.g. `sql` over its sqlite driver) keep going through jetty untouched.
+
+Pass `local_fallback=False` to require the remote module: the backend then
+raises `OSError` naming the missing module. An **unreachable** sidecar
+always raises, in both configurations — silently going local there would
+hide a misconfigured socket.
+
+| sidecar state | default (`local_fallback=True`) | `local_fallback=False` |
+|---|---|---|
+| filesystem module enabled | remote (wire mapping below) | remote |
+| sidecar up, module disabled/absent | local filesystem | `OSError` |
+| sidecar unreachable | `OSError` | `OSError` |
+
 ## Wire mapping
 
 | fsspec call | filesystem-v1 |

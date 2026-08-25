@@ -225,5 +225,92 @@ class JettyFsspecTest(absltest.TestCase):
             self.assertEqual(f.read(), b"by url")
 
 
+@absltest.skipUnless(_HAVE_FSSPEC, "fsspec is not installed")
+class LocalFallbackTest(absltest.TestCase):
+    """A reachable sidecar without the filesystem module: the backend falls
+    back to the normal local filesystem by default (configurable), so the
+    same jetty:// code runs whether or not the module is enabled. Only file
+    access degrades — the sidecar's other modules are untouched."""
+
+    def setUp(self):
+        super().setUp()
+        base = self.create_tempdir().full_path
+        cwd = os.getcwd()
+        os.chdir(base)
+        self.addCleanup(os.chdir, cwd)
+        self.base = base
+        self.sock = "jetty.sock"
+        cfg = Config.model_validate({"listener": {"uds": self.sock}})  # no modules
+        server = uvicorn.Server(
+            uvicorn.Config(create_app(cfg), uds=self.sock, log_level="warning")
+        )
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        self.addCleanup(self._stop, server, thread)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if os.path.exists(self.sock):
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.connect(self.sock)
+                    break
+                except OSError:
+                    pass
+                finally:
+                    probe.close()
+            time.sleep(0.02)
+        else:
+            self.fail("sidecar did not come up on its socket")
+        self.fs = JettyFileSystem(uds=self.sock, skip_instance_cache=True)
+
+    @staticmethod
+    def _stop(server, thread):
+        server.should_exit = True
+        thread.join(timeout=5)
+
+    def test_operations_use_the_local_filesystem(self):
+        self.fs.pipe_file("notes.txt", b"local bytes")
+        self.assertEqual(self.fs.cat_file("notes.txt"), b"local bytes")
+        with open(os.path.join(self.base, "notes.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"local bytes")  # a plain cwd file
+        self.assertTrue(self.fs.exists("notes.txt"))
+        self.assertFalse(self.fs.exists("ghost.txt"))
+        self.assertEqual(self.fs.info("notes.txt")["type"], "file")
+        self.fs.mv("notes.txt", "renamed.txt")
+        self.assertFalse(os.path.exists(os.path.join(self.base, "notes.txt")))
+        self.fs.cp_file("renamed.txt", "copy.txt")
+        self.fs.rm_file("copy.txt")
+        self.assertFalse(os.path.exists(os.path.join(self.base, "copy.txt")))
+        with self.fs.open("renamed.txt", "r") as f:
+            self.assertEqual(f.read(), "local bytes")
+
+    def test_gettmpdir_is_local_scratch(self):
+        d = self.fs.gettmpdir()
+        self.assertTrue(os.path.isdir(os.path.join(self.base, d)))
+        self.fs.pipe_file(f"{d}/scratch.txt", b"work")
+        self.assertEqual(self.fs.cat_file(f"{d}/scratch.txt"), b"work")
+        self.fs.rm_file(f"{d}/scratch.txt")
+        self.fs.rm_file(d)
+        self.assertFalse(os.path.exists(os.path.join(self.base, d)))
+
+    def test_ls_stays_unsupported_for_parity(self):
+        # Deliberately identical to remote mode: code written against the
+        # fallback must not break the day the module is enabled.
+        with self.assertRaises(NotImplementedError):
+            self.fs.ls("")
+
+    def test_local_fallback_off_raises_loudly(self):
+        strict = JettyFileSystem(
+            uds=self.sock, local_fallback=False, skip_instance_cache=True
+        )
+        with self.assertRaisesRegex(OSError, "filesystem module"):
+            strict.cat_file("anything.txt")
+
+    def test_unreachable_sidecar_raises_never_falls_back(self):
+        lost = JettyFileSystem(uds="no-such.sock", skip_instance_cache=True)
+        with self.assertRaisesRegex(OSError, "sidecar"):
+            lost.exists("anything.txt")
+
+
 if __name__ == "__main__":
     absltest.main()

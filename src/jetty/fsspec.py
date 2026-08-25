@@ -12,6 +12,12 @@ the entire file, ``mv``/``cp_file`` are the sidecar's atomic server-side
 rename/copy, ``gettmpdir()`` returns a fresh server-created scratch
 directory, and there is no directory listing — ``ls`` and everything built
 on it raise ``NotImplementedError``.
+
+When the sidecar does not offer the module — jetty modules are opt-in, and
+disabled is the default — the backend falls back to the normal local
+filesystem (configurable: ``local_fallback``), so the same ``jetty://``
+code runs in both deployments. Only file access degrades; the sidecar's
+other modules (sql, mail, …) are untouched by the fallback.
 """
 
 from __future__ import annotations
@@ -19,8 +25,12 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import os
+import shutil
 import socket
-from datetime import datetime
+import stat as stat_module
+import tempfile
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -83,6 +93,13 @@ class JettyFileSystem(AbstractFileSystem):
         ``uds``.
     timeout:
         Socket timeout in seconds for each request.
+    local_fallback:
+        When the sidecar is reachable but does not offer the filesystem
+        module (disabled or an older build), operate on the normal local
+        filesystem instead — same relative paths, resolved against the
+        working directory. Default True. Set False to require the remote
+        module and fail loudly. An unreachable sidecar always raises,
+        either way.
     """
 
     protocol = "jetty"
@@ -93,6 +110,7 @@ class JettyFileSystem(AbstractFileSystem):
         uds: str | None = None,
         tcp: str | None = None,
         timeout: float = 60.0,
+        local_fallback: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -101,6 +119,10 @@ class JettyFileSystem(AbstractFileSystem):
         self.tcp = tcp
         self.uds = uds if uds else (None if tcp else DEFAULT_UDS)
         self.timeout = timeout
+        self.local_fallback = local_fallback
+        #: None = not yet probed; True = the sidecar serves the module;
+        #: False = it does not (fallback or strict error per config).
+        self._remote: bool | None = None
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
@@ -159,15 +181,50 @@ class JettyFileSystem(AbstractFileSystem):
             raise ValueError(detail)
         raise OSError(f"{detail} (HTTP {status}, code {code or 'unknown'})")
 
+    def _is_remote(self) -> bool:
+        """Once per instance: does the sidecar offer the filesystem module?
+
+        ``GET /v1/meta`` is the supported discovery path (SPEC.md §4.2) and
+        is build-agnostic: a sidecar that predates the module simply does
+        not list it — where a per-request probe could never tell "module
+        absent" from "file absent". An *unreachable* sidecar always raises:
+        silently going local there would hide a misconfigured socket.
+        """
+        if self._remote is None:
+            where = self.uds or self.tcp
+            try:
+                status, data, _ = self._request("GET", "/v1/meta")
+            except OSError as exc:
+                raise OSError(
+                    f"no jetty sidecar reachable at {where}: {exc}"
+                ) from exc
+            names: list[Any] = []
+            if status == 200:
+                try:
+                    names = [m.get("name") for m in json.loads(data)["modules"]]
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    names = []
+            self._remote = "filesystem" in names
+        if not self._remote and not self.local_fallback:
+            raise OSError(
+                f"the jetty sidecar at {self.uds or self.tcp} does not offer "
+                "the filesystem module, and local_fallback is off"
+            )
+        return self._remote
+
     # --- whole-file operations (filesystem-v1 §5) -----------------------
 
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
     ) -> bytes:
         path = self._strip_protocol(path)
-        status, data, _ = self._request("GET", self._file_url(path))
-        if status != 200:
-            self._raise(status, data, path)
+        if not self._is_remote():
+            with open(path, "rb") as f:
+                data = f.read()
+        else:
+            status, data, _ = self._request("GET", self._file_url(path))
+            if status != 200:
+                self._raise(status, data, path)
         # The wire is whole-file; a requested range is sliced locally.
         if start is not None or end is not None:
             data = data[start:end]
@@ -175,6 +232,10 @@ class JettyFileSystem(AbstractFileSystem):
 
     def pipe_file(self, path: str, value: bytes, **kwargs: Any) -> None:
         path = self._strip_protocol(path)
+        if not self._is_remote():
+            with open(path, "wb") as f:
+                f.write(bytes(value))
+            return
         status, data, _ = self._request(
             "PUT", self._file_url(path), bytes(value), "application/octet-stream"
         )
@@ -183,6 +244,12 @@ class JettyFileSystem(AbstractFileSystem):
 
     def rm_file(self, path: str) -> None:
         path = self._strip_protocol(path)
+        if not self._is_remote():
+            if os.path.isdir(path):
+                os.rmdir(path)  # matches the wire: empty directories only
+            else:
+                os.remove(path)
+            return
         status, data, _ = self._request("DELETE", self._file_url(path))
         if status != 200:
             self._raise(status, data, path)
@@ -201,10 +268,18 @@ class JettyFileSystem(AbstractFileSystem):
 
     def mv(self, path1: str, path2: str, **kwargs: Any) -> None:
         """Atomic server-side rename(2) — never download-reupload-delete."""
+        if not self._is_remote():
+            os.replace(self._strip_protocol(path1), self._strip_protocol(path2))
+            return
         self._two_path("rename", path1, path2)
 
     def cp_file(self, path1: str, path2: str, **kwargs: Any) -> None:
         """Server-side copy: the content never crosses to the client."""
+        if not self._is_remote():
+            shutil.copyfile(
+                self._strip_protocol(path1), self._strip_protocol(path2)
+            )
+            return
         self._two_path("copy", path1, path2)
 
     def gettmpdir(self) -> str:
@@ -218,6 +293,10 @@ class JettyFileSystem(AbstractFileSystem):
         its files and then the directory itself (``rm_file`` works on an
         empty directory).
         """
+        if not self._is_remote():
+            # Scratch under the working directory, mirroring the reference
+            # driver's tmp-under-root; mkdtemp semantics either way.
+            return os.path.basename(tempfile.mkdtemp(prefix=".jetty-tmp-", dir="."))
         status, data, _ = self._request("POST", f"{_MOUNT}/tmpdir")
         if status != 200:
             self._raise(status, data, "tmpdir")
@@ -226,6 +305,22 @@ class JettyFileSystem(AbstractFileSystem):
     # --- metadata, within what a whole-file API can say -----------------
 
     def _stat(self, path: str) -> dict[str, Any]:
+        if not self._is_remote():
+            st = os.stat(path or ".")
+            if stat_module.S_ISREG(st.st_mode):
+                kind = "file"
+            elif stat_module.S_ISDIR(st.st_mode):
+                kind = "directory"
+            else:
+                kind = "other"
+            return {
+                "size": st.st_size,
+                "type": kind,
+                "mode": f"{stat_module.S_IMODE(st.st_mode):04o}",
+                "mtime": datetime.fromtimestamp(
+                    st.st_mtime, timezone.utc
+                ).isoformat(),
+            }
         status, data, _ = self._request(
             "GET", f"{_MOUNT}/stat/" + quote(path, safe="/")
         )
@@ -275,6 +370,8 @@ class JettyFileSystem(AbstractFileSystem):
         **kwargs: Any,
     ) -> _JettyFile:
         path = self._strip_protocol(path)
+        if not self._is_remote():
+            return open(path, mode)
         if mode == "rb":
             return _JettyFile(self, path, mode, self.cat_file(path))
         if mode == "wb":
