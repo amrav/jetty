@@ -76,7 +76,10 @@ implementation:
 
 The proxy speaks with its own voice only when there is no upstream response
 to relay: the upstream is unreachable, times out, or the connection fails
-before a status line arrives. Such a response:
+before a status line arrives — or a **non-streamed** response body fails
+before it is fully received, at which point nothing has been relayed to the
+client and a partial body relayed as if complete would be the forbidden
+shape (SPEC.md §1.2). Such a response:
 
 - **MUST** use the provider's own error shape for the surface, with a `5xx`
   status;
