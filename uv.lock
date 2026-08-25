@@ -204,6 +204,12 @@ dev = [
     { name = "mercurial" },
     { name = "sqlglot" },
 ]
+fsspec = [
+    { name = "fsspec" },
+]
+llmproxy = [
+    { name = "httpx" },
+]
 sql = [
     { name = "sqlglot" },
 ]
@@ -213,14 +219,16 @@ requires-dist = [
     { name = "absl-py", marker = "extra == 'dev'", specifier = ">=2.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fsspec", marker = "extra == 'dev'", specifier = ">=2023.12" },
+    { name = "fsspec", marker = "extra == 'fsspec'", specifier = ">=2023.12" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'llmproxy'", specifier = ">=0.27" },
     { name = "mercurial", marker = "extra == 'dev'", specifier = ">=6.6" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=25" },
     { name = "sqlglot", marker = "extra == 'sql'", specifier = ">=25" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["sql", "dev"]
+provides-extras = ["llmproxy", "sql", "fsspec", "dev"]
 
 [[package]]
 name = "mercurial"
