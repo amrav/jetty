@@ -147,7 +147,7 @@ class JettyFileSystem(AbstractFileSystem):
         except (ValueError, KeyError, TypeError):
             pass
         if not code:
-            # A HEAD response carries no body; fall back to the status.
+            # Bodiless or unparseable error: fall back to the status.
             code = {400: "invalid_request", 403: "permission_denied",
                     404: "not_found"}.get(status, "")
         detail = f"{path}: {message or code or f'HTTP {status}'}"

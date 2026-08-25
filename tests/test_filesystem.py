@@ -150,6 +150,24 @@ class ReadTest(FilesystemTestCase):
         r = self.build().head("/filesystem/v1/files/ghost.txt")
         self.assertEqual(r.status_code, 404)
 
+    def test_head_of_directory_mirrors_get(self):
+        os.makedirs(os.path.join(self.root, "adir"))
+        r = self.build().head("/filesystem/v1/files/adir")
+        self.assertEqual(r.status_code, 400)
+
+    @absltest.skipUnless(_NONROOT, "permission bits do not bind root")
+    def test_head_is_stat_backed_not_a_read(self):
+        # The one documented GET/HEAD divergence (filesystem-v1 §5.1): a
+        # stat-able but unreadable file answers HEAD 200 — proof the content
+        # was never opened — while GET stays 403.
+        path = self.seed("sealed.bin", b"cannot read me")
+        os.chmod(path, 0o000)
+        client = self.build()
+        r = client.head("/filesystem/v1/files/sealed.bin")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["content-length"], "14")
+        self.assert_error(self.read(client, "sealed.bin"), 403, "permission_denied")
+
     def test_missing_intermediate_directory_is_not_found(self):
         self.assert_error(self.read(self.build(), "no/dir/f.txt"), 404, "not_found")
 
