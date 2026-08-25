@@ -277,6 +277,6 @@ class JettyFileSystem(AbstractFileSystem):
         raise NotImplementedError(f"mode {mode!r} is not supported")
 
 
-# `import jetty_fsspec` is enough to make fsspec.filesystem("jetty") work;
+# `import jetty.fsspec` is enough to make fsspec.filesystem("jetty") work;
 # an installed wheel also registers via the fsspec.specs entry point.
 register_implementation("jetty", JettyFileSystem, clobber=True)
