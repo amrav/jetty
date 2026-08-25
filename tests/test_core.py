@@ -99,7 +99,7 @@ class EnableDisableTest(JettyTestCase):
             self.build(ath={"enabled": True})
         self.assertIn("ath", str(ctx.exception))
 
-    def test_auth_and_llmproxy_are_not_yet_registered(self):
+    def test_auth_is_not_yet_registered(self):
         """Until the real module lands, enabling it must fail closed, not stub."""
         with self.assertRaises(UnknownModuleError):
             self.build(auth={"enabled": True})
