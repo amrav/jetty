@@ -31,7 +31,7 @@ details stay internal.
 | `reference` module (worked example + test fixture) | **Implemented, tested** |
 | `hg` module ([`spec/hg-v1.md`](spec/hg-v1.md)) — read-only Mercurial API | **Implemented, tested** |
 | `auth` module ([`spec/auth-v1.md`](spec/auth-v1.md)) | Specified, not implemented |
-| `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) | Specified, not implemented |
+| `llmproxy` module ([`spec/llmproxy-v1.md`](spec/llmproxy-v1.md)) — transparent LLM provider proxy | **Implemented, tested** (`gemini` surface; `passthrough` + `mock` modes) |
 | `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `issuetracker` module ([`spec/issuetracker-v1.md`](spec/issuetracker-v1.md)) — emulated Google Issue Tracker API (**experimental**) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `mail` module ([`spec/mail-v1.md`](spec/mail-v1.md)) — outbound mail relay | **Implemented, tested** (`spool` driver; delivery drivers are private) |

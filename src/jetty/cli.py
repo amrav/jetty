@@ -10,10 +10,12 @@ Exit codes follow the convention that a supervisor can act on:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import socket
 import stat
 import sys
+import threading
 from pathlib import Path
 
 import uvicorn
@@ -88,6 +90,28 @@ def bind_uds(path: Path, mode: int) -> socket.socket:
     return sock
 
 
+def bind_tcp(host: str, port: int) -> socket.socket:
+    """Bind a module-declared TCP listener (SPEC.md §2.1)."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(128)
+    return sock
+
+
+def _serve_module_listener(app: object, sock: socket.socket, log_level: str) -> None:
+    """One uvicorn server on this thread's own event loop.
+
+    uvicorn installs signal handlers only on the main thread
+    (`Server.capture_signals` no-ops elsewhere), so the control listener
+    keeps process lifecycle to itself and these threads die with it —
+    daemon threads, no shutdown protocol of their own.
+    """
+    config = uvicorn.Config(app, log_level=log_level, access_log=False)
+    asyncio.run(uvicorn.Server(config).serve(sockets=[sock]))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="jetty", description=__doc__)
     parser.add_argument("--config", "-c", required=True, help="path to jetty.toml")
@@ -128,6 +152,27 @@ def main(argv: list[str] | None = None) -> None:
     if args.check:
         print(f"jetty: config OK; modules enabled: {', '.join(enabled) or '(none)'}")
         return
+
+    # Module-declared listeners (SPEC.md §2.1): bind them all before serving
+    # anything, so a taken port is a loud exit 2 and never a half-up sidecar.
+    for module in app.state.jetty.modules:
+        module_app = module.listener_app()
+        if module_app is None:
+            continue
+        bind = module.listener_bind
+        if bind is None:
+            _fail(f"module {module.name!r} declares a listener app but no bind address")
+        host, port = bind
+        try:
+            module_sock = bind_tcp(host, port)
+        except OSError as e:
+            _fail(f"module {module.name!r} cannot bind listener {host}:{port}: {e}")
+        threading.Thread(
+            target=_serve_module_listener,
+            args=(module_app, module_sock, config.log.level),
+            name=f"jetty-{module.name}-listener",
+            daemon=True,
+        ).start()
 
     listener = config.listener
     if listener.uds:

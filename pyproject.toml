@@ -11,6 +11,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+llmproxy = [
+    "httpx>=0.27",          # the llmproxy passthrough driver's HTTP client
+]
 sql = [
     "sqlglot>=25",          # the sql module's GoogleSQL-side dialect gate
 ]
