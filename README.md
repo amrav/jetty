@@ -35,7 +35,8 @@ details stay internal.
 | `chat` module ([`spec/chat-v1.md`](spec/chat-v1.md)) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `issuetracker` module ([`spec/issuetracker-v1.md`](spec/issuetracker-v1.md)) — emulated Google Issue Tracker API (**experimental**) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `mail` module ([`spec/mail-v1.md`](spec/mail-v1.md)) — outbound mail relay | **Implemented, tested** (`spool` driver; delivery drivers are private) |
-| `filesystem`, `xmanager` | Names reserved only |
+| `filesystem` module ([`spec/filesystem-v1.md`](spec/filesystem-v1.md)) — whole-file read/write with unix semantics (**experimental**) | **Implemented, tested** (`local` driver; drivers for other storage are private) |
+| `xmanager` | Name reserved only |
 | Orchestrator `jetty-orc` ([`docs/orchestrator.md`](docs/orchestrator.md)) — companion tool, not a module | **Implemented, tested** |
 
 Enabling an unimplemented module fails at boot with `unknown module` rather than

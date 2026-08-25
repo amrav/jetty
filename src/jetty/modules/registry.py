@@ -120,6 +120,13 @@ def _register_builtins() -> None:
 
     register("sql", _sql)
 
+    def _filesystem(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.filesystem.module import FilesystemModule
+
+        return FilesystemModule(settings)
+
+    register("filesystem", _filesystem)
+
     # `auth` and `llmproxy` are specified in spec/ and not yet implemented.
     # They are deliberately NOT registered: naming them here before they exist
     # would let `enabled = true` boot a sidecar that answers auth questions

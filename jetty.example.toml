@@ -126,3 +126,15 @@ enabled = true
 #   enabled = true
 #   driver = "sqlite"
 #   path = "/var/lib/app/app.sqlite"
+
+# Whole-file read/write under one root directory with standard unix
+# semantics (spec/filesystem-v1.md — experimental). Operations run with the
+# sidecar's own process identity; the kernel's permission bits are the
+# access control. This build ships the `local` driver; drivers for other
+# storage are private implementations. `root` is machine-specific, hence
+# disabled here.
+#
+#   [modules.filesystem]
+#   enabled = true
+#   driver = "local"
+#   root = "/srv/files"
