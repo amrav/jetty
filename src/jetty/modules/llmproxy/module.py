@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import asynccontextmanager
 from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, FastAPI, Request, Response
@@ -128,14 +129,6 @@ class LlmProxyModule(Module):
     def meta(self) -> dict[str, Any]:
         return {**super().meta(), "listener": self.listener_url}
 
-    async def startup(self) -> None:
-        for forwarder in self._forwarders.values():
-            await forwarder.start()
-
-    async def shutdown(self) -> None:
-        for forwarder in self._forwarders.values():
-            await forwarder.close()
-
     # --- usage accounting (llmproxy-v1 §6) ---------------------------------
 
     def _record(
@@ -181,7 +174,28 @@ class LlmProxyModule(Module):
 
     def listener_app(self) -> FastAPI:
         if self._app is None:
-            app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+            @asynccontextmanager
+            async def lifespan(app: FastAPI):
+                # The forwarders' httpx clients are created, used, and closed
+                # HERE — on the event loop that serves the surfaces (the
+                # module-listener thread's), never the control listener's.
+                # Pools and locks bind to the loop that first uses them, and
+                # an aclose() from another loop is a cross-loop error. A
+                # lifespan on this app also orders creation strictly before
+                # the first request, which a control-plane startup() cannot:
+                # cli.py starts listener threads before the control lifespan.
+                for forwarder in self._forwarders.values():
+                    await forwarder.start()
+                try:
+                    yield
+                finally:
+                    for forwarder in self._forwarders.values():
+                        await forwarder.close()
+
+            app = FastAPI(
+                docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+            )
             for name, surface in self.config.surfaces.items():
                 prefix = _SHIPPED[name]
                 if surface.mode == "mock":

@@ -88,7 +88,7 @@ class Forwarder:
         return match.group(1) if match else "-"
 
     async def handle(self, request: Request, path: str) -> Response:
-        assert self._client is not None, "forwarder used before startup()"
+        assert self._client is not None, "forwarder used before its listener lifespan"
         model = self._model(path)
         self._record(model, requests=1)
 
@@ -132,8 +132,19 @@ class Forwarder:
                 headers={"cache-control": upstream.headers.get("cache-control", "no-store")},
             )
 
-        raw = await upstream.aread()
-        await upstream.aclose()
+        try:
+            raw = await upstream.aread()
+        except httpx.HTTPError as exc:
+            # Status line arrived, body did not. Nothing has been relayed to
+            # the client yet, so jetty may still speak (§3.1) — relaying a
+            # partial body as if complete is the forbidden shape.
+            log.warning("llmproxy %s upstream body lost: %r", self.surface, exc)
+            self._record(model, errors=1)
+            return synthesized(
+                self.surface, "upstream_lost", "upstream connection lost mid-response"
+            )
+        finally:
+            await upstream.aclose()
         if upstream.status_code >= 400:
             self._record(model, errors=1)
         else:
@@ -147,15 +158,20 @@ class Forwarder:
     async def _relay(self, upstream: httpx.Response) -> AsyncIterator[bytes]:
         """Verbatim byte relay (§3): no added events, no added terminators.
 
-        If the upstream connection drops mid-stream, this generator ends and
-        the client connection closes — truncation is propagated, never
-        papered over with a fabricated tail (SPEC.md §1.2).
+        If the upstream connection drops mid-stream, the exception propagates
+        and the server aborts the client connection mid-body — truncation is
+        propagated, never papered over with a fabricated tail (SPEC.md §1.2).
         """
         try:
             async for chunk in upstream.aiter_raw():
                 yield chunk
         except httpx.HTTPError as exc:
             log.warning("llmproxy %s upstream stream lost: %r", self.surface, exc)
+            # Swallowing here would let StreamingResponse finish cleanly and
+            # send a valid terminal chunk — a fabricated "complete". Re-raise
+            # so the server aborts the connection and truncation stays
+            # visible to the client's own HTTP layer.
+            raise
         finally:
             await upstream.aclose()
 

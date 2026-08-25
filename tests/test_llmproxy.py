@@ -68,7 +68,12 @@ class LlmProxyTestCase(absltest.TestCase):
         module = next(
             m for m in control.app.state.jetty.modules if m.name == "llmproxy"
         )
-        return TestClient(module.listener_app())
+        client = TestClient(module.listener_app())
+        # The listener app's own lifespan starts the forwarders' httpx
+        # clients — on the loop that serves them, as in production.
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        return client
 
     @staticmethod
     def prompt(text: str = "ping", **over) -> dict:
@@ -263,10 +268,13 @@ class _FakeUpstream(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         self.raw_body = self.rfile.read(length) if length else b""
         self.server.seen.append(self)  # type: ignore[attr-defined]
-        status, content_type, payload = self.server.responder(self)  # type: ignore[attr-defined]
+        status, content_type, payload, *extra = self.server.responder(self)  # type: ignore[attr-defined]
+        # A fourth element over-declares content-length; the connection then
+        # closes short of it, simulating an upstream lost mid-body.
+        declared = extra[0] if extra else len(payload)
         self.send_response(status)
         self.send_header("content-type", content_type)
-        self.send_header("content-length", str(len(payload)))
+        self.send_header("content-length", str(declared))
         self.end_headers()
         self.wfile.write(payload)
 
@@ -305,7 +313,7 @@ class PassthroughTest(LlmProxyTestCase):
                 }
             }
         )
-        self.control.__enter__()  # lifespan starts the forwarder's client
+        self.control.__enter__()  # control plane only; forwarders start with the surface app
         self.addCleanup(self.control.__exit__, None, None, None)
         self.client = self.surface(self.control)
 
@@ -436,6 +444,33 @@ class PassthroughTest(LlmProxyTestCase):
         self.assertEqual(row["input_tokens"], 7)   # from relayed usageMetadata
         self.assertEqual(row["output_tokens"], 3)
 
+    def test_body_lost_mid_response_is_synthesized_and_marked(self):
+        """llmproxy-v1 §3.1: a buffered body that dies mid-read has relayed
+        nothing — jetty speaks, provider-shaped and marked, instead of a
+        bare 500 or a silent truncation."""
+        self.upstream.responder = lambda req: (200, "application/json", b'{"partial', 400)
+        r = self.client.post(
+            "/genai/v1beta/models/m1:generateContent", json=self.prompt()
+        )
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(r.headers.get("x-jetty-error"), "upstream_lost")
+        self.assertEqual(r.json()["error"]["status"], "UNAVAILABLE")
+        row = self.control.get("/llmproxy/v1/usage").json()["models"]["m1"]
+        self.assertEqual(row["errors"], 1)
+
+    def test_stream_lost_mid_relay_aborts_not_clean_eof(self):
+        """llmproxy-v1 §3: truncation is propagated. A swallowed stream
+        error would end the chunked response with a valid terminal chunk — a
+        fabricated 'complete'. The relay must abort the connection."""
+        self.upstream.responder = lambda req: (
+            200, "text/event-stream", b'data: {"candidates":[]}\r\n\r\n', 4096
+        )
+        with self.assertRaises(Exception):
+            self.client.post(
+                "/genai/v1beta/models/m:streamGenerateContent?alt=sse",
+                json=self.prompt(),
+            )
+
     def test_capabilities_names_the_upstream(self):
         body = self.control.get("/llmproxy/v1/capabilities").json()
         self.assertEqual(body["surfaces"]["gemini"]["mode"], "passthrough")
@@ -516,6 +551,72 @@ class ProcessTest(absltest.TestCase):
         self.assertIn(
             "mock(gemini-3.7-flash)",
             completion["candidates"][0]["content"]["parts"][0]["text"],
+        )
+
+
+class ProcessPassthroughTest(absltest.TestCase):
+    """Passthrough through a real process: the forwarder's httpx client must
+    live on the module listener's own event loop (a daemon thread), and must
+    exist before the first request — the cross-loop/boot-race regression."""
+
+    def test_passthrough_over_real_sockets(self):
+        workdir = self.create_tempdir()
+        os.chmod(workdir.full_path, 0o700)
+        origin = os.getcwd()
+        self.addCleanup(os.chdir, origin)
+        os.chdir(workdir.full_path)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeUpstream)
+        upstream.seen = []
+        upstream.responder = lambda req: (200, "application/json", b'{"pong": true}')
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        self.addCleanup(upstream.shutdown)
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        config = workdir.create_file(
+            "jetty.toml",
+            content=(
+                '[listener]\nuds = "jetty.sock"\n\n'
+                "[modules.llmproxy]\nenabled = true\n"
+                f'listener = "127.0.0.1:{port}"\n\n'
+                "[modules.llmproxy.surfaces.gemini]\n"
+                'mode = "passthrough"\napi_key = "process-test-key"\n'
+                f'upstream = "http://127.0.0.1:{upstream.server_address[1]}"\n'
+            ),
+        ).full_path
+        env = {**os.environ, "PYTHONPATH": IMPORT_ROOT}
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "jetty.cli", "--config", config],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        self.addCleanup(proc.wait, timeout=10)
+        self.addCleanup(proc.terminate)
+
+        deadline = time.monotonic() + 20
+        while True:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/genai/v1beta/models/m:generateContent",
+                data=b'{"contents":[]}',
+                headers={"content-type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    self.assertEqual(json.load(r), {"pong": True})
+                break
+            except OSError:
+                if proc.poll() is not None:
+                    self.fail(f"jetty exited: {proc.stdout.read().decode()}")
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        self.assertEqual(
+            upstream.seen[-1].headers.get("x-goog-api-key"), "process-test-key"
         )
 
 
