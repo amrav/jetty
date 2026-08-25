@@ -210,11 +210,12 @@ class JettyFileSystem(AbstractFileSystem):
         """A fresh private scratch directory on the sidecar.
 
         ``mkdtemp(3)`` semantics, deliberately: each call returns a NEW
-        uniquely-named directory (mode 0700 server-side), so concurrent
-        clients cannot collide in a shared scratch path. Write into it with
-        ordinary paths under the returned prefix; clean up by removing its
-        files and then the directory itself (``rm_file`` works on an empty
-        directory).
+        uniquely-named directory, so concurrent clients cannot collide in a
+        shared scratch path. The returned path is opaque — where the scratch
+        area lives is the sidecar implementation's choice. Write into it
+        with ordinary paths under the returned prefix; clean up by removing
+        its files and then the directory itself (``rm_file`` works on an
+        empty directory).
         """
         status, data, _ = self._request("POST", f"{_MOUNT}/tmpdir")
         if status != 200:

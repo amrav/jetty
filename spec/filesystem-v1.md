@@ -202,12 +202,17 @@ integrity. Copying a file onto itself (after symlink resolution) is
 
 ### 5.6 `POST /filesystem/v1/tmpdir` — a fresh scratch directory
 
-`mkdtemp(3)` semantics: creates the scratch area `tmp/` under the root on
-first use, then a fresh, uniquely-named directory inside it — mode `0700`
-as modified by the umask — and returns its path, ready for §5.2 writes.
-Each call returns a new directory, private to its caller by construction;
-this is the deliberate alternative to handing every client one shared
-scratch path and inheriting its collisions. The request takes no body.
+`mkdtemp(3)` semantics: creates a fresh, uniquely-named scratch directory
+and returns its path, ready for §5.2 writes. Each call returns a new
+directory, private to its caller by construction; this is the deliberate
+alternative to handing every client one shared scratch path and inheriting
+its collisions. The request takes no body.
+
+Where the scratch area lives is the implementation's choice. The returned
+path is an ordinary §3 path to build on, and clients **MUST** treat it as
+opaque — never predict, hard-code, or reconstruct it. The reference `local`
+driver uses `tmp/` under the root, mode `0700` as modified by the umask;
+another implementation may place scratch space anywhere in its namespace.
 
 `200`:
 
@@ -266,7 +271,7 @@ Drivers defined alongside this document:
 
 | Driver | Behaviour |
 |---|---|
-| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes. Performs no network I/O. |
+| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes; scratch directories (§5.6) under `tmp/`. Performs no network I/O. |
 
 Drivers for other storage implement the same Protocol privately without
 modification to this module or its surface. Naming a driver this build does

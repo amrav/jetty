@@ -153,7 +153,10 @@ class JettyFsspecTest(absltest.TestCase):
 
     def test_gettmpdir_scratch_lifecycle(self):
         d = self.fs.gettmpdir()
-        self.assertTrue(d.startswith("tmp/"), d)
+        # The path is opaque (where scratch space lives is the sidecar's
+        # choice); all that matters is that it works as a path.
+        self.assertTrue(d)
+        self.assertFalse(d.startswith("/"), d)
         self.fs.pipe_file(f"{d}/scratch.txt", b"work")
         self.assertEqual(self.fs.cat_file(f"{d}/scratch.txt"), b"work")
         self.fs.rm_file(f"{d}/scratch.txt")

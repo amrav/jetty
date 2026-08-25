@@ -56,8 +56,10 @@ containment (filesystem-v1 §3).
 
 `gettmpdir` is this backend's extension — fsspec defines no scratch-space
 API. It has `mkdtemp(3)` semantics: each call returns a **new** private
-directory (mode `0700` server-side), so concurrent clients cannot collide
-in a shared scratch path.
+directory, so concurrent clients cannot collide in a shared scratch path.
+Treat the returned path as opaque: where the scratch area lives is the
+sidecar implementation's choice (the reference sidecar uses `tmp/` under
+its root, mode `0700`).
 
 Errors map onto Python's own: `not_found` → `FileNotFoundError`,
 `permission_denied` → `PermissionError`, `invalid_request` → `ValueError`;
