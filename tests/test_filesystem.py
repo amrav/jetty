@@ -138,6 +138,17 @@ class ReadTest(FilesystemTestCase):
     def test_missing_file_is_not_found(self):
         self.assert_error(self.read(self.build(), "ghost.txt"), 404, "not_found")
 
+    def test_head_reports_size_without_body(self):
+        self.seed("notes.txt", b"hello\nworld\n")
+        r = self.build().head("/filesystem/v1/files/notes.txt")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["content-length"], "12")
+        self.assertEqual(r.content, b"")
+
+    def test_head_missing_file_is_not_found(self):
+        r = self.build().head("/filesystem/v1/files/ghost.txt")
+        self.assertEqual(r.status_code, 404)
+
     def test_missing_intermediate_directory_is_not_found(self):
         self.assert_error(self.read(self.build(), "no/dir/f.txt"), 404, "not_found")
 

@@ -126,6 +126,10 @@ The file's entire content as raw bytes, `Content-Type` guessed from the file
 name, `application/octet-stream` when unguessable. An empty file is a `200`
 with an empty body.
 
+The endpoint also answers `HEAD`, identically but bodiless, with
+`Content-Length` reporting the size — existence and size without moving the
+file.
+
 ### 5.2 `PUT /filesystem/v1/files/{path}` — write one file
 
 The request body is the file's entire new content, raw. Any `Content-Type`,
