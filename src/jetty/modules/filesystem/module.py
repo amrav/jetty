@@ -190,15 +190,30 @@ class FilesystemModule(Module):
     def router(self) -> APIRouter:
         router = APIRouter(route_class=_FsRoute)
 
-        # HEAD answers identically minus the body (filesystem-v1 §5.1): the
-        # transport strips it, and Content-Length still reports the size —
-        # existence and size without moving the file.
-        @router.api_route("/files/{file_path:path}", methods=["GET", "HEAD"])
+        @router.get("/files/{file_path:path}")
         async def read_file(file_path: str) -> Response:
             rel = _check_path(file_path)
             content = await self._dispatch(self.driver.read, rel)
             media = mimetypes.guess_type(rel)[0] or "application/octet-stream"
             return Response(content=content, media_type=media)
+
+        # HEAD is answered from stat, never by reading content (filesystem-v1
+        # §5.1): same refusals as GET for non-regular files, Content-Length
+        # synthesized from metadata. The one documented divergence: a
+        # stat-able but unreadable file answers HEAD 200 where GET is 403 —
+        # stat(2)'s truth rather than open(2)'s.
+        @router.head("/files/{file_path:path}")
+        async def head_file(file_path: str) -> Response:
+            rel = _check_path(file_path)
+            st = await self._dispatch(self.driver.stat, rel)
+            if st.type != "file":
+                raise JettyError(
+                    ErrorCode.INVALID_REQUEST, f"{rel!r} is not a regular file"
+                )
+            media = mimetypes.guess_type(rel)[0] or "application/octet-stream"
+            return Response(
+                media_type=media, headers={"content-length": str(st.size)}
+            )
 
         @router.put("/files/{file_path:path}")
         async def write_file(file_path: str, request: Request) -> dict[str, Any]:

@@ -131,9 +131,13 @@ The file's entire content as raw bytes, `Content-Type` guessed from the file
 name, `application/octet-stream` when unguessable. An empty file is a `200`
 with an empty body.
 
-The endpoint also answers `HEAD`, identically but bodiless, with
-`Content-Length` reporting the size — existence and size without moving the
-file.
+The endpoint also answers `HEAD`: the same status codes and headers, no
+body, `Content-Length` reporting the size. An implementation **SHOULD**
+answer it from metadata (§5.7) rather than by reading content — with the
+visible consequence that a file whose metadata is readable but whose
+content is not **MAY** answer `HEAD` with `200` where `GET` is
+`403 permission_denied`. Refusals for non-regular files (§2) apply to
+`HEAD` exactly as to `GET`.
 
 ### 5.2 `PUT /filesystem/v1/files/{path}` — write one file
 
