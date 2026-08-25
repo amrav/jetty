@@ -20,6 +20,7 @@ import http.client
 import io
 import json
 import socket
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -224,21 +225,37 @@ class JettyFileSystem(AbstractFileSystem):
 
     # --- metadata, within what a whole-file API can say -----------------
 
+    def _stat(self, path: str) -> dict[str, Any]:
+        status, data, _ = self._request(
+            "GET", f"{_MOUNT}/stat/" + quote(path, safe="/")
+        )
+        if status != 200:
+            self._raise(status, data, path)
+        return json.loads(data)
+
     def exists(self, path: str, **kwargs: Any) -> bool:
-        path = self._strip_protocol(path)
-        status, _, _ = self._request("HEAD", self._file_url(path))
-        return status == 200
+        try:
+            self._stat(self._strip_protocol(path))
+        except FileNotFoundError:
+            return False
+        return True
 
     def info(self, path: str, **kwargs: Any) -> dict[str, Any]:
         path = self._strip_protocol(path)
-        status, data, length = self._request("HEAD", self._file_url(path))
-        if status != 200:
-            self._raise(status, data, path)
+        row = self._stat(path)
         return {
             "name": path,
-            "size": int(length) if length is not None else None,
-            "type": "file",
+            "size": row["size"],
+            "type": row["type"],           # "file" | "directory" | "other"
+            "mode": row["mode"],
+            "mtime": row["mtime"],
         }
+
+    def modified(self, path: str) -> datetime:
+        """Last content modification, as the sidecar's stat reports it."""
+        return datetime.fromisoformat(
+            self._stat(self._strip_protocol(path))["mtime"]
+        )
 
     def ls(self, path: str, detail: bool = True, **kwargs: Any) -> list:
         raise NotImplementedError(

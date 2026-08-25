@@ -51,7 +51,7 @@ containment (filesystem-v1 §3).
 | `rm_file` / `rm` | `DELETE /filesystem/v1/files/{path}` |
 | `mv` | `POST /filesystem/v1/rename` (atomic, server-side) |
 | `cp_file` / `copy` | `POST /filesystem/v1/copy` |
-| `exists` / `info` | `HEAD /filesystem/v1/files/{path}` |
+| `exists` / `info` / `modified` | `GET /filesystem/v1/stat/{path}` |
 | `gettmpdir` | `POST /filesystem/v1/tmpdir` |
 
 `gettmpdir` is this backend's extension — fsspec defines no scratch-space
@@ -72,9 +72,9 @@ Everything follows from filesystem-v1 being a **whole-file** API:
 - Reads and writes buffer the entire file in memory; `open` returns an
   in-memory file that uploads on `close`. Writes land atomically on the
   sidecar's side.
-- There is no directory listing or stat, so `ls`, `glob`, `find`, `walk`,
-  and friends raise `NotImplementedError`. `exists`/`info` answer for
-  files, not directories.
+- There is no directory listing, so `ls`, `glob`, `find`, `walk`, and
+  friends raise `NotImplementedError`. `exists`/`info`/`modified` are
+  backed by the wire `stat` and answer for any path, directories included.
 - Parent directories are not created (there is no general-purpose `mkdir`
   on the wire); writing into a missing directory raises `FileNotFoundError`.
   The one directory-creating call is `gettmpdir()`; its directory is

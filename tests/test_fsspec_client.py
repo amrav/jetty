@@ -13,6 +13,7 @@ import os
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 
 from absl.testing import absltest
 
@@ -165,6 +166,24 @@ class JettyFsspecTest(absltest.TestCase):
 
     def test_gettmpdir_is_fresh_each_call(self):
         self.assertNotEqual(self.fs.gettmpdir(), self.fs.gettmpdir())
+
+    def test_info_carries_stat_fields(self):
+        self.fs.pipe_file("meta.bin", b"\x00" * 64)
+        os.chmod(os.path.join(self.root, "meta.bin"), 0o640)
+        info = self.fs.info("meta.bin")
+        self.assertEqual(info["size"], 64)
+        self.assertEqual(info["type"], "file")
+        self.assertEqual(info["mode"], "0640")
+
+    def test_info_and_exists_answer_for_directories(self):
+        d = self.fs.gettmpdir()
+        self.assertTrue(self.fs.exists(d))
+        self.assertEqual(self.fs.info(d)["type"], "directory")
+
+    def test_modified(self):
+        self.fs.pipe_file("m.txt", b"x")
+        delta = datetime.now(timezone.utc) - self.fs.modified("m.txt")
+        self.assertLess(abs(delta.total_seconds()), 10)
 
     # --- error mapping --------------------------------------------------
 

@@ -45,6 +45,16 @@ class WriteResult:
 
 
 @dataclass
+class StatResult:
+    """One path's metadata (filesystem-v1 §5.7), symlinks followed."""
+
+    type: str      #: "file" | "directory" | "other"
+    size: int      #: st_size, bytes
+    mode: int      #: permission bits (S_IMODE)
+    mtime: float   #: last content modification, seconds since the epoch
+
+
+@dataclass
 class RenameResult:
     #: True iff nothing existed at the destination before the rename.
     created: bool
@@ -59,3 +69,6 @@ class FsDriver(Protocol):
     #: filesystem-v1 §5.6: a fresh private scratch directory under the
     #: store's scratch area; returns its relative path.
     def mkdtemp(self) -> str: ...
+    #: filesystem-v1 §5.7: metadata for any existing object, symlinks
+    #: followed. The regular-files-only rule deliberately does not apply.
+    def stat(self, path: str) -> StatResult: ...
