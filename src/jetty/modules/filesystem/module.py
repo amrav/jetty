@@ -5,9 +5,10 @@ envelope. filesystem-v1 §6 adds one module code, which SPEC.md §3.1 permits
 a module to define; the route class below renders it in the same envelope
 shape, with the same closed-set-by-construction discipline as `jetty.errors`.
 
-The bodies themselves are raw bytes both ways (filesystem-v1 §5) — a file is
+File content crosses as raw bytes both ways (filesystem-v1 §5) — a file is
 not JSON, and wrapping one in base64 would make every client carry a second
-codec for no gain between co-located processes.
+codec for no gain between co-located processes. The two-path operations
+(rename, copy) take ordinary JSON bodies.
 
 Handlers are async only to read the request body; every driver call runs in
 the threadpool (`run_in_threadpool`), so blocking disk I/O never parks the
@@ -23,7 +24,7 @@ from typing import Any, Callable, Coroutine, Mapping, TypeVar
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from jetty.errors import ErrorCode, JettyError
@@ -99,6 +100,15 @@ class FilesystemSettings(BaseModel):
     driver: str = "local"
     #: The servable tree; the module's entire filesystem authority. Required.
     root: str
+
+
+class _TwoPaths(BaseModel):
+    """The rename/copy body (filesystem-v1 §5.4–§5.5): two §3 paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    from_: str = Field(alias="from")
+    to: str
 
 
 def _check_path(path: str) -> str:
@@ -195,6 +205,35 @@ class FilesystemModule(Module):
             log.info(
                 "filesystem write path=%s bytes=%d created=%s",
                 rel, result.size, result.created,
+            )
+            return {"size": result.size, "created": result.created}
+
+        @router.delete("/files/{file_path:path}")
+        async def delete_file(file_path: str) -> dict[str, Any]:
+            rel = _check_path(file_path)
+            await self._dispatch(self.driver.delete, rel)
+            log.info("filesystem delete path=%s", rel)
+            return {"deleted": True}
+
+        @router.post("/rename")
+        async def rename_file(body: _TwoPaths) -> dict[str, Any]:
+            src = _check_path(body.from_)
+            dst = _check_path(body.to)
+            result = await self._dispatch(self.driver.rename, src, dst)
+            log.info(
+                "filesystem rename from=%s to=%s created=%s",
+                src, dst, result.created,
+            )
+            return {"created": result.created}
+
+        @router.post("/copy")
+        async def copy_file(body: _TwoPaths) -> dict[str, Any]:
+            src = _check_path(body.from_)
+            dst = _check_path(body.to)
+            result = await self._dispatch(self.driver.copy, src, dst)
+            log.info(
+                "filesystem copy from=%s to=%s bytes=%d created=%s",
+                src, dst, result.size, result.created,
             )
             return {"size": result.size, "created": result.created}
 

@@ -1,30 +1,43 @@
-"""The ``local`` driver (filesystem-v1 §7): the configured root, exactly as
-the standard unix filesystem behaves.
+"""The ``local`` driver (filesystem-v1 §7): the configured root, with the
+standard unix filesystem's semantics and link-level atomic mutation.
 
 ``_resolve`` is the only door, and it containment-checks the resolved path —
 symlinks followed — before any filesystem operation, so a symlink inside the
 root cannot become a door out of it (filesystem-v1 §3). Beyond containment
-the driver adds nothing: operations run with the process's own identity,
-creation is ``open(2)`` with ``O_CREAT`` under the process umask, replacement
-is ``O_TRUNC`` in place (inode, mode, owner, hard links survive), parents are
-not created, and the kernel's refusals surface as the typed exceptions the
+the driver adds nothing the kernel does not: operations run with the
+process's own identity, and its refusals surface as the typed exceptions the
 protocol distinguishes rather than being masked (filesystem-v1 §2).
 
-One check is not the kernel's: only regular files are served. A FIFO would
-block the worker indefinitely on ``open``; refusing non-regular files up
-front turns that hang into an immediate ``InvalidTarget``.
+Every mutation is link-level, which is where the atomicity comes from:
+
+- a **write** (and a copy's destination) is a same-directory temporary file,
+  fsynced, then ``rename(2)``d into place — a concurrent reader sees the old
+  content or the new in full, and a crash mid-write leaves the old file;
+- a **rename** is ``rename(2)`` itself; one that cannot be atomic (``EXDEV``:
+  a filesystem boundary inside the root) is refused, never degraded to
+  copy-plus-delete;
+- a **delete** is ``unlink(2)``.
+
+The visible consequence is that directory write permission governs every
+mutation, exactly as it does for ``mv(1)`` and ``rm(1)``.
+
+Two checks are not the kernel's: only regular files are served (a FIFO would
+block the worker indefinitely on ``open``), and a copy onto the same file is
+refused up front rather than half-done.
 """
 
 from __future__ import annotations
 
 import errno
 import os
+import secrets
 import stat as stat_module
 
 from jetty.modules.filesystem.driver import (
     FileMissing,
     InvalidTarget,
     PermissionDenied,
+    RenameResult,
     WriteResult,
 )
 
@@ -68,7 +81,7 @@ class LocalFsDriver:
 
     def _stat_regular(self, full: str, path: str) -> os.stat_result | None:
         """Stat, insisting on a regular file. None = nothing there (which
-        read and write treat differently)."""
+        the operations treat differently)."""
         try:
             st = os.stat(full)
         except FileNotFoundError:
@@ -81,11 +94,59 @@ class LocalFsDriver:
             raise InvalidTarget(f"{path!r} is not a regular file")
         return st
 
-    def read(self, path: str) -> bytes:
-        full = self._resolve(path)
+    def _require(self, full: str, path: str) -> os.stat_result:
         st = self._stat_regular(full, path)
         if st is None:
             raise FileMissing(f"no file at {path!r}")
+        return st
+
+    def _open_temp(self, directory: str, mode: int) -> tuple[int, str]:
+        """A fresh ``O_EXCL`` temporary next to the target. The mode argument
+        is subject to the process umask, exactly as in ``open(2)`` — which is
+        how a created file ends up ``0666``-as-modified-by-umask without this
+        driver ever reading the umask."""
+        while True:
+            tmp = os.path.join(directory, f".jetty-tmp-{secrets.token_hex(8)}")
+            try:
+                return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), tmp
+            except FileExistsError:
+                continue
+
+    def _replace(
+        self, full: str, path: str, content: bytes, create_mode: int = 0o666
+    ) -> WriteResult:
+        """Temp + fsync + ``rename(2)``: the whole atomic-write story
+        (filesystem-v1 §2). ``create_mode`` is the pre-umask mode when
+        nothing exists at the path — ``0666`` for a plain write, the source's
+        bits for a copy."""
+        st = self._stat_regular(full, path)
+        try:
+            fd, tmp = self._open_temp(
+                os.path.dirname(full), create_mode if st is None else 0o600
+            )
+        except OSError as exc:
+            raise _translate(exc, path) from exc
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            if st is not None:
+                # Preserve the replaced file's exact bits: chmod, not the
+                # open mode, so the umask cannot re-mask them.
+                os.chmod(tmp, stat_module.S_IMODE(st.st_mode))
+            os.rename(tmp, full)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise _translate(exc, path) from exc
+        return WriteResult(size=len(content), created=st is None)
+
+    def read(self, path: str) -> bytes:
+        full = self._resolve(path)
+        self._require(full, path)
         try:
             with open(full, "rb") as f:
                 return f.read()
@@ -94,10 +155,45 @@ class LocalFsDriver:
 
     def write(self, path: str, content: bytes) -> WriteResult:
         full = self._resolve(path)
-        st = self._stat_regular(full, path)
+        return self._replace(full, path, content)
+
+    def delete(self, path: str) -> None:
+        full = self._resolve(path)
+        self._require(full, path)
         try:
-            with open(full, "wb") as f:
-                f.write(content)
+            os.unlink(full)
         except OSError as exc:
             raise _translate(exc, path) from exc
-        return WriteResult(size=len(content), created=st is None)
+
+    def rename(self, src: str, dst: str) -> RenameResult:
+        src_full = self._resolve(src)
+        dst_full = self._resolve(dst)
+        self._require(src_full, src)
+        dst_st = self._stat_regular(dst_full, dst)
+        try:
+            os.rename(src_full, dst_full)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                raise InvalidTarget(
+                    f"{src!r} -> {dst!r} crosses a filesystem boundary; "
+                    "an atomic rename is impossible"
+                ) from exc
+            raise _translate(exc, f"{src} -> {dst}") from exc
+        return RenameResult(created=dst_st is None)
+
+    def copy(self, src: str, dst: str) -> WriteResult:
+        src_full = self._resolve(src)
+        dst_full = self._resolve(dst)
+        if src_full == dst_full:
+            raise InvalidTarget(f"{src!r} and {dst!r} are the same file")
+        src_st = self._require(src_full, src)
+        try:
+            with open(src_full, "rb") as f:
+                content = f.read()
+        except OSError as exc:
+            raise _translate(exc, src) from exc
+        # cp(1)'s creation rule: a fresh destination takes the source's
+        # permission bits (umask applied); an existing one keeps its own.
+        return self._replace(
+            dst_full, dst, content, create_mode=stat_module.S_IMODE(src_st.st_mode)
+        )
