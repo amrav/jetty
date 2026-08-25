@@ -189,7 +189,10 @@ class FilesystemModule(Module):
     def router(self) -> APIRouter:
         router = APIRouter(route_class=_FsRoute)
 
-        @router.get("/files/{file_path:path}")
+        # HEAD answers identically minus the body (filesystem-v1 §5.1): the
+        # transport strips it, and Content-Length still reports the size —
+        # existence and size without moving the file.
+        @router.api_route("/files/{file_path:path}", methods=["GET", "HEAD"])
         async def read_file(file_path: str) -> Response:
             rel = _check_path(file_path)
             content = await self._dispatch(self.driver.read, rel)
@@ -236,5 +239,11 @@ class FilesystemModule(Module):
                 src, dst, result.size, result.created,
             )
             return {"size": result.size, "created": result.created}
+
+        @router.post("/tmpdir")
+        async def tmpdir() -> dict[str, Any]:
+            path = await self._dispatch(self.driver.mkdtemp)
+            log.info("filesystem tmpdir path=%s", path)
+            return {"path": path}
 
         return router

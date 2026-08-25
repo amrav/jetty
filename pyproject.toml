@@ -17,16 +17,23 @@ llmproxy = [
 sql = [
     "sqlglot>=25",          # the sql module's GoogleSQL-side dialect gate
 ]
+fsspec = [
+    "fsspec>=2023.12",      # the jetty.fsspec client backend
+]
 dev = [
     "absl-py>=2.1",         # absltest: test runner plus managed temp files/dirs
     "httpx>=0.27",          # test client + the conformance suite's HTTP transport
     "mercurial>=6.6",       # the hg module's tests seed real repositories
     "sqlglot>=25",          # the sql module's tests exercise the dialect gate
+    "fsspec>=2023.12",      # the jetty-fsspec client (clients/fsspec) tests
 ]
 
 [project.scripts]
 jetty = "jetty.cli:main"
 jetty-orc = "jetty.orchestrator.cli:main"
+
+[project.entry-points."fsspec.specs"]
+jetty = "jetty.fsspec:JettyFileSystem"
 
 [build-system]
 requires = ["hatchling"]
