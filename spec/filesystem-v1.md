@@ -29,13 +29,14 @@ content at any level (SPEC.md §1.4 applied to data); paths **MAY** be logged.
 
 In scope: reading one file's entire content; writing — creating or replacing
 — one file's entire content; deleting one file or one empty directory;
-renaming one file; copying one file; creating a scratch directory (§5.6).
-Writes, renames, and copies land atomically (§2).
+renaming one file; copying one file; creating a scratch directory (§5.6);
+reading one path's metadata (§5.7). Writes, renames, and copies land
+atomically (§2).
 
-Deliberately out of scope for v1: directory listing; stat as a queryable
-resource; general-purpose mkdir (scratch directories, §5.6, are the only
-directory creation); byte ranges, streaming, and partial updates; permission
-changes (chmod/chown); locks and leases; watch/notify; extended attributes.
+Deliberately out of scope for v1: directory listing; general-purpose mkdir
+(scratch directories, §5.6, are the only directory creation); byte ranges,
+streaming, and partial updates; permission changes (chmod/chown); locks and
+leases; watch/notify; extended attributes.
 
 ---
 
@@ -225,6 +226,28 @@ its files (§5.3) and then the directory itself (empty-directory delete,
 §5.3). A deployment may of course place `root` on storage with its own
 expiry.
 
+### 5.7 `GET /filesystem/v1/stat/{path}` — one path's metadata
+
+`stat(2)`, symlinks followed (§2). Works on any existing object — metadata
+carries no blocking risk, so the regular-files-only rule (§2) does not
+apply here; `type` says what was found.
+
+`200`:
+
+```json
+{ "type": "file", "size": 2048, "mode": "0644", "mtime": "2026-08-25T12:00:00+00:00" }
+```
+
+| field | meaning |
+|---|---|
+| `type` | `"file"`, `"directory"`, or `"other"` (FIFO, socket, device). |
+| `size` | `st_size` in bytes. Meaningful for files; for anything else it is whatever the store reports. |
+| `mode` | The permission bits, octal, as `chmod` would write them. |
+| `mtime` | Last content modification, RFC 3339. |
+
+A missing path is `404 not_found`. Existence checking is a `stat` and a
+switch on the status code; there is no separate exists endpoint.
+
 ---
 
 ## 6. Errors
@@ -259,6 +282,7 @@ class FsDriver(Protocol):
     def rename(self, src: str, dst: str) -> RenameResult: ...
     def copy(self, src: str, dst: str) -> WriteResult: ...
     def mkdtemp(self) -> str: ...          # §5.6; returns the relative path
+    def stat(self, path: str) -> StatResult: ...       # §5.7
 ```
 
 Methods are synchronous — a driver does blocking I/O, and the surface keeps

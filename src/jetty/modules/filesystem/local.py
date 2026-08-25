@@ -39,6 +39,7 @@ from jetty.modules.filesystem.driver import (
     InvalidTarget,
     PermissionDenied,
     RenameResult,
+    StatResult,
     WriteResult,
 )
 
@@ -190,6 +191,29 @@ class LocalFsDriver:
         except OSError as exc:
             raise _translate(exc, "tmp") from exc
         return "tmp/" + os.path.basename(full)
+
+    def stat(self, path: str) -> StatResult:
+        """stat(2), symlinks followed. Any object type: a stat carries no
+        blocking risk, so the regular-files gate deliberately stays out."""
+        full = self._resolve(path)
+        try:
+            st = os.stat(full)
+        except FileNotFoundError:
+            raise FileMissing(f"no file at {path!r}") from None
+        except OSError as exc:
+            raise _translate(exc, path) from exc
+        if stat_module.S_ISREG(st.st_mode):
+            kind = "file"
+        elif stat_module.S_ISDIR(st.st_mode):
+            kind = "directory"
+        else:
+            kind = "other"
+        return StatResult(
+            type=kind,
+            size=st.st_size,
+            mode=stat_module.S_IMODE(st.st_mode),
+            mtime=st.st_mtime,
+        )
 
     def rename(self, src: str, dst: str) -> RenameResult:
         src_full = self._resolve(src)

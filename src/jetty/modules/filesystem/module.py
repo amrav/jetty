@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Mapping, TypeVar
 
 from fastapi import APIRouter, Request, Response
@@ -245,5 +246,19 @@ class FilesystemModule(Module):
             path = await self._dispatch(self.driver.mkdtemp)
             log.info("filesystem tmpdir path=%s", path)
             return {"path": path}
+
+        @router.get("/stat/{file_path:path}")
+        async def stat_path(file_path: str) -> dict[str, Any]:
+            rel = _check_path(file_path)
+            st = await self._dispatch(self.driver.stat, rel)
+            return {
+                "type": st.type,
+                "size": st.size,
+                # As chmod would write it: "0644", "0750", "1777".
+                "mode": f"{st.mode:04o}",
+                "mtime": datetime.fromtimestamp(
+                    st.mtime, timezone.utc
+                ).isoformat(),
+            }
 
         return router

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import stat
+from datetime import datetime
 
 from absl.testing import absltest
 from fastapi.testclient import TestClient
@@ -544,6 +545,49 @@ class TmpdirTest(FilesystemTestCase):
         r = self.delete(client, rel)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(os.path.exists(os.path.join(self.root, rel)))
+
+
+class StatTest(FilesystemTestCase):
+    """filesystem-v1 §5.7: stat(2) over the wire, symlinks followed."""
+
+    def stat(self, client, rel):
+        return client.get(f"/filesystem/v1/stat/{rel}")
+
+    def test_regular_file(self):
+        path = self.seed("notes.txt", b"hello world")
+        os.chmod(path, 0o644)
+        r = self.stat(self.build(), "notes.txt")
+        self.assertEqual(r.status_code, 200, r.text)
+        row = r.json()
+        self.assertEqual(row["type"], "file")
+        self.assertEqual(row["size"], 11)
+        self.assertEqual(row["mode"], "0644")
+        mtime = datetime.fromisoformat(row["mtime"])
+        self.assertLess(abs(mtime.timestamp() - os.stat(path).st_mtime), 2)
+
+    def test_directory(self):
+        os.makedirs(os.path.join(self.root, "adir"))
+        row = self.stat(self.build(), "adir").json()
+        self.assertEqual(row["type"], "directory")
+
+    def test_fifo_is_other_not_a_hang(self):
+        os.mkfifo(os.path.join(self.root, "pipe"))
+        row = self.stat(self.build(), "pipe").json()
+        self.assertEqual(row["type"], "other")
+
+    def test_missing_is_not_found(self):
+        self.assert_error(self.stat(self.build(), "ghost"), 404, "not_found")
+
+    def test_traversal_is_invalid_request(self):
+        r = self.build().get("/filesystem/v1/stat/%2e%2e/x")
+        self.assert_error(r, 400, "invalid_request")
+
+    def test_follows_symlinks(self):
+        path = self.seed("real.txt", b"content")
+        os.symlink(path, os.path.join(self.root, "alias.txt"))
+        row = self.stat(self.build(), "alias.txt").json()
+        self.assertEqual(row["type"], "file")
+        self.assertEqual(row["size"], 7)
 
 
 if __name__ == "__main__":
