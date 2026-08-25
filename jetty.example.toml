@@ -41,13 +41,24 @@ enabled = true
 #   enabled = true
 #   driver = "mock"
 
-# Specified in spec/llmproxy-v1.md, not yet implemented.
+# Transparent proxy for LLM provider APIs (spec/llmproxy-v1.md): each surface
+# offers exactly the provider's own API, forwarded verbatim — jetty holds the
+# key, strips client credentials, and counts usage; it never translates or
+# rejects request fields. Surfaces live on the module's own listener (their
+# URL layouts mirror the providers'); the control plane
+# (/llmproxy/v1/capabilities, /llmproxy/v1/usage) stays on the listener above.
+# This build ships the `gemini` surface. A surface in `mock` mode is a
+# deterministic emulator with no network I/O (development, CI, conformance);
+# `passthrough` needs the `llmproxy` extra for httpx.
 #
 #   [modules.llmproxy]
 #   enabled = true
-#   driver = "mock"
 #   listener = "127.0.0.1:7242"
-#   surfaces = ["openai", "anthropic", "gemini"]
+#
+#   [modules.llmproxy.surfaces.gemini]
+#   mode = "passthrough"                # or "mock"
+#   api_key = "..."
+#   # upstream = "https://generativelanguage.googleapis.com"
 
 # Outbound mail relay (spec/mail-v1.md): accepts a fully-composed message on
 # POST /mail/v1/send and delivers it through a driver. This build ships the

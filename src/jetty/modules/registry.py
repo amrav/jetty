@@ -127,11 +127,18 @@ def _register_builtins() -> None:
 
     register("filesystem", _filesystem)
 
-    # `auth` and `llmproxy` are specified in spec/ and not yet implemented.
-    # They are deliberately NOT registered: naming them here before they exist
-    # would let `enabled = true` boot a sidecar that answers auth questions
-    # with a stub. Until the module lands, `[modules.auth]` fails at boot with
-    # UnknownModuleError, which is the correct fail-closed behaviour.
+    def _llmproxy(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.llmproxy.module import LlmProxyModule
+
+        return LlmProxyModule(settings)
+
+    register("llmproxy", _llmproxy)
+
+    # `auth` is specified in spec/ and not yet implemented. It is deliberately
+    # NOT registered: naming it here before it exists would let `enabled =
+    # true` boot a sidecar that answers auth questions with a stub. Until the
+    # module lands, `[modules.auth]` fails at boot with UnknownModuleError,
+    # which is the correct fail-closed behaviour for a security component.
 
 
 _register_builtins()

@@ -62,6 +62,21 @@ class Module(abc.ABC):
             "mount": self.mount,
         }
 
+    def listener_app(self) -> Any | None:
+        """SPEC.md §2.1: a module MAY declare its own listener for a foreign
+        URL space that cannot be prefix-mounted on the control listener.
+
+        Return the ASGI app to serve there, or None (the default). A module
+        returning one must also provide `listener_bind`, and overrides
+        `meta()` to advertise the listener URL (SPEC.md §4.2).
+        """
+        return None
+
+    @property
+    def listener_bind(self) -> tuple[str, int] | None:
+        """(host, port) for `listener_app`; None when the module has none."""
+        return None
+
     async def startup(self) -> None:
         """Optional: open pools, load keys. Raising here aborts boot."""
 
