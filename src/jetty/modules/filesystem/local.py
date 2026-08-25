@@ -22,11 +22,9 @@ import os
 import stat as stat_module
 
 from jetty.modules.filesystem.driver import (
-    MAX_FILE_BYTES,
     FileMissing,
     InvalidTarget,
     PermissionDenied,
-    TooLarge,
     WriteResult,
 )
 
@@ -88,23 +86,13 @@ class LocalFsDriver:
         st = self._stat_regular(full, path)
         if st is None:
             raise FileMissing(f"no file at {path!r}")
-        if st.st_size > MAX_FILE_BYTES:
-            raise TooLarge(f"{path!r} is {st.st_size} bytes; ceiling is {MAX_FILE_BYTES}")
         try:
             with open(full, "rb") as f:
-                content = f.read(MAX_FILE_BYTES + 1)
+                return f.read()
         except OSError as exc:
             raise _translate(exc, path) from exc
-        if len(content) > MAX_FILE_BYTES:
-            # Grew between stat and open; the answer must stay the truth.
-            raise TooLarge(f"{path!r} exceeds the {MAX_FILE_BYTES}-byte ceiling")
-        return content
 
     def write(self, path: str, content: bytes) -> WriteResult:
-        if len(content) > MAX_FILE_BYTES:
-            # The surface caps the request body first; this holds for every
-            # caller of the driver, not just the HTTP surface.
-            raise TooLarge(f"content is {len(content)} bytes; ceiling is {MAX_FILE_BYTES}")
         full = self._resolve(path)
         st = self._stat_regular(full, path)
         try:

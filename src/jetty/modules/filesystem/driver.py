@@ -1,7 +1,7 @@
 """The ``FsDriver`` protocol and its typed failures (filesystem-v1 §7).
 
-The surface (module.py) validates the wire contract — path syntax, the
-whole-file size ceiling — and dispatches to a driver; a driver owns
+The surface (module.py) validates the wire contract — path syntax — and
+dispatches to a driver; a driver owns
 containment, the filesystem operations, and the unix semantics of
 filesystem-v1 §2 against its own store. Nothing in this file knows about
 URLs, JSON, or HTTP.
@@ -20,10 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-#: filesystem-v1 §5: the whole-file ceiling, both directions. A file over
-#: this wants ranges and streaming, which v1 deliberately does not have.
-MAX_FILE_BYTES = 32 * 1024 * 1024
-
 
 class FileMissing(Exception):
     """No file at the path, or a missing directory on the way to it
@@ -39,10 +35,6 @@ class InvalidTarget(Exception):
     """The path is syntactically fine but names something unservable: it
     resolves outside the driver's authority, hits a symlink loop, or is not
     a regular file → ``400 invalid_request``."""
-
-
-class TooLarge(Exception):
-    """File or content over ``MAX_FILE_BYTES`` → ``413 too_large``."""
 
 
 @dataclass

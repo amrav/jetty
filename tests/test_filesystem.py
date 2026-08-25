@@ -1,8 +1,8 @@
 """The filesystem module against a real directory tree (spec/filesystem-v1.md).
 
 Assertions are black-box through the HTTP surface: unix permission semantics,
-inode-preserving replacement, symlink containment, the whole-file ceiling,
-and the SPEC.md §3.1 envelope with the module's own codes.
+inode-preserving replacement, symlink containment, and the SPEC.md §3.1
+envelope with the module's own code.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from absl.testing import absltest
 from fastapi.testclient import TestClient
 
 from jetty.config import Config
-from jetty.modules.filesystem.driver import MAX_FILE_BYTES
 from jetty.server import create_app
 
 _NONROOT = os.geteuid() != 0  # permission-bit tests are meaningless as root
@@ -140,12 +139,6 @@ class ReadTest(FilesystemTestCase):
         os.mkfifo(os.path.join(self.root, "pipe"))
         self.assert_error(self.read(self.build(), "pipe"), 400, "invalid_request")
 
-    def test_over_ceiling_file_is_too_large(self):
-        # Sparse: the size is what matters, not the disk.
-        with open(os.path.join(self.root, "huge"), "wb") as f:
-            f.truncate(MAX_FILE_BYTES + 1)
-        self.assert_error(self.read(self.build(), "huge"), 413, "too_large")
-
 
 class WriteTest(FilesystemTestCase):
 
@@ -187,11 +180,6 @@ class WriteTest(FilesystemTestCase):
     def test_directory_target_is_invalid_request(self):
         os.makedirs(os.path.join(self.root, "adir"))
         self.assert_error(self.write(self.build(), "adir", b"x"), 400, "invalid_request")
-
-    def test_over_ceiling_body_is_too_large(self):
-        r = self.write(self.build(), "big", b"\x00" * (MAX_FILE_BYTES + 1))
-        self.assert_error(r, 413, "too_large")
-        self.assertFalse(os.path.exists(os.path.join(self.root, "big")))
 
 
 class PermissionTest(FilesystemTestCase):

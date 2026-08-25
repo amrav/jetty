@@ -99,9 +99,9 @@ root = "/srv/files"   # required: the servable tree
 ## 5. Endpoints
 
 Both endpoints carry the file's content **raw** — never JSON-wrapped, never
-base64. Content larger than **32 MiB** (33554432 bytes) is refused in both
-directions with `413 too_large`: v1 is a whole-file API, and a file that size
-wants ranges and streaming, which are out of scope (§1).
+base64. v1 imposes no size ceiling; a whole file crosses in one request and
+is held in memory at both ends, which is the cost of having neither ranges
+nor streaming (§1).
 
 ### 5.1 `GET /filesystem/v1/files/{path}` — read one file
 
@@ -128,12 +128,11 @@ file. Creation and replacement per §2.
 
 ## 6. Errors
 
-Additional codes beyond SPEC.md §3.1, both `retryable: false`:
+One additional code beyond SPEC.md §3.1, `retryable: false`:
 
 | `code` | Status | Meaning |
 |---|---|---|
 | `permission_denied` | 403 | The kernel refused the operation for the sidecar's process identity (`EACCES`, `EPERM`, `EROFS`). |
-| `too_large` | 413 | File or request content over §5's ceiling. |
 
 Standard mapping:
 
@@ -147,8 +146,8 @@ Standard mapping:
 
 ## 7. Driver interface
 
-The surface validates the wire contract — §3's path syntax, §5's ceiling —
-and dispatches to a **driver**, which owns containment, the filesystem
+The surface validates the wire contract — §3's path syntax — and
+dispatches to a **driver**, which owns containment, the filesystem
 operations, and §2's semantics against its own store.
 
 ```python
@@ -159,7 +158,7 @@ class FsDriver(Protocol):
 
 Methods are synchronous — a driver does blocking I/O, and the surface keeps
 it off the event loop. A driver raises `FileMissing`, `PermissionDenied`,
-`InvalidTarget`, or `TooLarge` for the conditions §6 enumerates; anything
+or `InvalidTarget` for the conditions §6 enumerates; anything
 else it raises is a failing store, which the surface maps to
 `503 upstream_unavailable` — never to a fabricated success (SPEC.md §1.2).
 

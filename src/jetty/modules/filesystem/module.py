@@ -1,8 +1,8 @@
-"""The filesystem-v1 surface: path syntax, the size ceiling, error mapping.
+"""The filesystem-v1 surface: path syntax and error mapping.
 
 Like `sql`, this is not a foreign protocol: errors use the SPEC.md §3
-envelope. filesystem-v1 §6 adds two module codes, which SPEC.md §3.1 permits
-a module to define; the route class below renders them in the same envelope
+envelope. filesystem-v1 §6 adds one module code, which SPEC.md §3.1 permits
+a module to define; the route class below renders it in the same envelope
 shape, with the same closed-set-by-construction discipline as `jetty.errors`.
 
 The bodies themselves are raw bytes both ways (filesystem-v1 §5) — a file is
@@ -29,12 +29,10 @@ from starlette.concurrency import run_in_threadpool
 from jetty.errors import ErrorCode, JettyError
 from jetty.modules.base import Module
 from jetty.modules.filesystem.driver import (
-    MAX_FILE_BYTES,
     FileMissing,
     FsDriver,
     InvalidTarget,
     PermissionDenied,
-    TooLarge,
 )
 
 log = logging.getLogger("jetty.filesystem")
@@ -42,12 +40,11 @@ log = logging.getLogger("jetty.filesystem")
 #: filesystem-v1 §3: longer than any real path, short enough to refuse abuse.
 _MAX_PATH_BYTES = 4096
 
-#: filesystem-v1 §6: the module's own codes. Status and retryability are
+#: filesystem-v1 §6: the module's own code. Status and retryability are
 #: paired here so a handler cannot mismatch them — same argument as
 #: jetty.errors.
 _SEMANTICS: dict[str, tuple[int, bool]] = {
     "permission_denied": (403, False),
-    "too_large": (413, False),
 }
 
 
@@ -168,8 +165,6 @@ class FilesystemModule(Module):
             raise JettyError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
         except PermissionDenied as exc:
             raise FsApiError("permission_denied", str(exc)) from exc
-        except TooLarge as exc:
-            raise FsApiError("too_large", str(exc)) from exc
         except (JettyError, FsApiError):
             raise
         except Exception as exc:
@@ -195,11 +190,6 @@ class FilesystemModule(Module):
         async def write_file(file_path: str, request: Request) -> dict[str, Any]:
             rel = _check_path(file_path)
             raw = await request.body()
-            if len(raw) > MAX_FILE_BYTES:
-                raise FsApiError(
-                    "too_large",
-                    f"content is over the {MAX_FILE_BYTES}-byte ceiling",
-                )
             result = await self._dispatch(self.driver.write, rel, raw)
             # filesystem-v1 §0: paths may be logged, content never.
             log.info(
