@@ -9,8 +9,8 @@ yet. Do not build against it anything you are unwilling to update.
 Mount: `/filesystem/v1` on the control listener
 Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
-The `filesystem` module reads and writes **whole files** under one configured
-root directory. It exists so an OSS binary can keep files on whatever storage
+The `filesystem` module reads, writes, renames, copies, and deletes **whole
+files** under one configured root directory. It exists so an OSS binary can keep files on whatever storage
 the host actually provides — a directory on local disk against the reference
 build, whatever store a private driver fronts internally — without carrying
 mount configuration, storage credentials, or a second client library.
@@ -27,13 +27,13 @@ content at any level (SPEC.md §1.4 applied to data); paths **MAY** be logged.
 
 ## 1. Scope
 
-In scope: reading one file's entire content, and writing — creating or
-replacing — one file's entire content.
+In scope: reading one file's entire content; writing — creating or replacing
+— one file's entire content; deleting one file; renaming one file; copying
+one file. Writes, renames, and copies land atomically (§2).
 
 Deliberately out of scope for v1: directory listing; stat as a queryable
-resource; delete, rename, copy, and mkdir; byte ranges, streaming, and
-partial updates; permission changes (chmod/chown); locks and leases;
-watch/notify; extended attributes.
+resource; mkdir; byte ranges, streaming, and partial updates; permission
+changes (chmod/chown); locks and leases; watch/notify; extended attributes.
 
 ---
 
@@ -46,22 +46,38 @@ watch/notify; extended attributes.
   performs no impersonation (SPEC.md §1.1) — a deployment wanting different
   authority runs the sidecar as a different user.
 - **Creation.** A write to a path with no file creates it as `open(2)` with
-  `O_CREAT` would: mode `0666` as modified by the process umask. The module
-  never chmods.
-- **Replacement.** A write to an existing file truncates in place
-  (`O_TRUNC`), preserving the inode: mode, ownership, and hard links
-  survive. Replacement therefore requires write permission on the **file**,
-  not on its directory.
-- **Parents are not created.** A write into a directory that does not exist
-  is `404 not_found`, as `open(2)` would say `ENOENT`.
-- **Symlinks are followed**, for reads and writes both — subject to the
-  containment rule in §3.
-- **Regular files only.** A path naming a directory, FIFO, socket, or device
-  node is `400 invalid_request` (a FIFO would otherwise block the worker
-  indefinitely — the refusal is deliberate, not an omission).
-- **No atomicity, no locking.** A write is truncate-then-write; a reader
-  concurrent with a writer can observe a torn state, and the last writer
-  wins. v1 defines no coordination; callers that need it bring their own.
+  `O_CREAT` would: mode `0666` as modified by the process umask. A copy
+  creates its destination with the **source's** permission bits, as modified
+  by the umask — what `cp(1)` does.
+- **Atomic replacement.** A write or copy lands as a same-directory
+  temporary file, fsynced, then moved into place with `rename(2)`; a rename
+  is `rename(2)` itself. A reader concurrent with any of them sees the old
+  content or the new in full, never a mixture, and a crash mid-operation
+  leaves the old file in place. The replacement is a **new inode**: the
+  replaced file's permission bits are preserved onto it, ownership becomes
+  the sidecar's own, and a hard link to the old content keeps the old
+  content. A rename that cannot be atomic — the destination lies across a
+  filesystem boundary inside the root (`EXDEV`) — is refused
+  `400 invalid_request`, never degraded to copy-plus-delete.
+- **Directory permission governs mutation.** Because every mutation is
+  link-level (`rename(2)`, `unlink(2)`), creating, replacing, renaming, and
+  deleting all require write permission on the **directory**. A read-only
+  file in a writable directory can be replaced, renamed over, or deleted —
+  exactly as `mv(1)` and `rm(1)`; a writable file in an unwritable directory
+  cannot be.
+- **Parents are not created.** An operation whose destination lies in a
+  directory that does not exist is `404 not_found`, as the syscall would say
+  `ENOENT`.
+- **Symlinks are followed**, for every operation and on both sides of the
+  two-path ones — subject to the containment rule in §3. The namespace is
+  transparent: a delete or rename addressed through a symlink acts on the
+  resolved target, and the link itself stays.
+- **Regular files only.** Any path naming a directory, FIFO, socket, or
+  device node is `400 invalid_request` (a FIFO would otherwise block the
+  worker indefinitely — the refusal is deliberate, not an omission).
+- **No locking.** Individual operations are atomic (above), but v1 defines
+  no locks, leases, or transactions spanning operations; between requests,
+  the last writer wins.
 
 ---
 
@@ -98,10 +114,11 @@ root = "/srv/files"   # required: the servable tree
 
 ## 5. Endpoints
 
-Both endpoints carry the file's content **raw** — never JSON-wrapped, never
-base64. v1 imposes no size ceiling; a whole file crosses in one request and
-is held in memory at both ends, which is the cost of having neither ranges
-nor streaming (§1).
+File content crosses **raw** — never JSON-wrapped, never base64 (§5.1,
+§5.2); the two-path operations take ordinary JSON bodies (SPEC.md §2.2
+applies to them). v1 imposes no size ceiling; a whole file crosses in one
+request and is held in memory at both ends, which is the cost of having
+neither ranges nor streaming (§1).
 
 ### 5.1 `GET /filesystem/v1/files/{path}` — read one file
 
@@ -124,6 +141,55 @@ file. Creation and replacement per §2.
 
 `created` is `true` iff no file existed at the path before this write.
 
+### 5.3 `DELETE /filesystem/v1/files/{path}` — delete one file
+
+`unlink(2)`. Deleting a file that does not exist is `404 not_found` — the
+truth of `ENOENT`, not an idempotent `200`.
+
+`200`:
+
+```json
+{ "deleted": true }
+```
+
+### 5.4 `POST /filesystem/v1/rename` — rename one file, atomically
+
+```json
+{ "from": "drafts/report.txt", "to": "final/report.txt" }
+```
+
+Both fields are §3 paths. An existing destination is replaced atomically
+(§2); with nothing at the destination the rename is a plain move. Unknown
+fields are rejected `400` (SPEC.md §6).
+
+`200`:
+
+```json
+{ "created": true }
+```
+
+`created` is `true` iff nothing existed at `to` before the rename. Renaming
+a file onto itself is the syscall's no-op success, answered with
+`created: false`.
+
+### 5.5 `POST /filesystem/v1/copy` — copy one file
+
+```json
+{ "from": "template.ini", "to": "instance.ini" }
+```
+
+Reads `from` whole, then writes `to` by §2's atomic path — so the
+destination, too, is never observable half-written. The source is read once;
+a writer racing the copy affects which full content is copied, never its
+integrity. Copying a file onto itself (after symlink resolution) is
+`400 invalid_request`.
+
+`200`:
+
+```json
+{ "size": 2048, "created": false }
+```
+
 ---
 
 ## 6. Errors
@@ -138,7 +204,7 @@ Standard mapping:
 
 | Condition | Response |
 |---|---|
-| Path fails §3's rules or resolves outside the root; path names something other than a regular file; symlink loop | `400 invalid_request` |
+| Path fails §3's rules or resolves outside the root; path names something other than a regular file; symlink loop; a rename that would cross a filesystem boundary; a copy of a file onto itself | `400 invalid_request` |
 | No file at the path, or a missing directory on the way to it | `404 not_found` |
 | Any other filesystem failure (`EIO`, `ENOSPC`, …) | `503 upstream_unavailable` |
 
@@ -154,6 +220,9 @@ operations, and §2's semantics against its own store.
 class FsDriver(Protocol):
     def read(self, path: str) -> bytes: ...
     def write(self, path: str, content: bytes) -> WriteResult: ...
+    def delete(self, path: str) -> None: ...
+    def rename(self, src: str, dst: str) -> RenameResult: ...
+    def copy(self, src: str, dst: str) -> WriteResult: ...
 ```
 
 Methods are synchronous — a driver does blocking I/O, and the surface keeps
@@ -166,7 +235,7 @@ Drivers defined alongside this document:
 
 | Driver | Behaviour |
 |---|---|
-| `local` | The configured root on the local filesystem, exactly as §2 describes. Performs no network I/O. |
+| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes. Performs no network I/O. |
 
 Drivers for other storage implement the same Protocol privately without
 modification to this module or its surface. Naming a driver this build does
