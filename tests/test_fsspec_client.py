@@ -1,9 +1,9 @@
-"""The jetty-fsspec client against a live sidecar on a real unix socket.
+"""The jetty.fsspec client against a live sidecar on a real unix socket.
 
-The client (clients/fsspec) is standalone — no dependency on the jetty
-package — so these tests are the integration point: real HTTP over a real
-UDS against the real filesystem module, uvicorn serving in a background
-thread. Assertions cover the fsspec surface (cat/pipe/open/mv/cp/rm,
+The client (the `fsspec` extra) never touches module code in-process — it
+speaks the published wire contract — so these tests are the integration
+point: real HTTP over a real UDS against the real filesystem module,
+uvicorn serving in a background thread. Assertions cover the fsspec surface (cat/pipe/open/mv/cp/rm,
 exists/info) and the error mapping onto Python's exception vocabulary.
 """
 
@@ -11,18 +11,14 @@ from __future__ import annotations
 
 import os
 import socket
-import sys
 import threading
 import time
 
 from absl.testing import absltest
 
-_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(_REPO, "clients", "fsspec", "src"))
-
 try:
     import fsspec
-    from jetty_fsspec import JettyFileSystem
+    from jetty.fsspec import JettyFileSystem
     _HAVE_FSSPEC = True
 except ImportError:
     _HAVE_FSSPEC = False
@@ -154,6 +150,18 @@ class JettyFsspecTest(absltest.TestCase):
     def test_ls_is_not_implemented(self):
         with self.assertRaises(NotImplementedError):
             self.fs.ls("")
+
+    def test_gettmpdir_scratch_lifecycle(self):
+        d = self.fs.gettmpdir()
+        self.assertTrue(d.startswith("tmp/"), d)
+        self.fs.pipe_file(f"{d}/scratch.txt", b"work")
+        self.assertEqual(self.fs.cat_file(f"{d}/scratch.txt"), b"work")
+        self.fs.rm_file(f"{d}/scratch.txt")
+        self.fs.rm_file(d)  # empty now: rmdir(2) on the sidecar
+        self.assertFalse(os.path.exists(os.path.join(self.root, d)))
+
+    def test_gettmpdir_is_fresh_each_call(self):
+        self.assertNotEqual(self.fs.gettmpdir(), self.fs.gettmpdir())
 
     # --- error mapping --------------------------------------------------
 

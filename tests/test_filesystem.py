@@ -353,8 +353,15 @@ class DeleteTest(FilesystemTestCase):
     def test_missing_file_is_not_found(self):
         self.assert_error(self.delete(self.build(), "ghost"), 404, "not_found")
 
-    def test_directory_is_invalid_request(self):
+    def test_empty_directory_is_deleted(self):
+        # The cleanup half of tmpdir (filesystem-v1 §5.3): rmdir(2).
         os.makedirs(os.path.join(self.root, "adir"))
+        r = self.delete(self.build(), "adir")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "adir")))
+
+    def test_non_empty_directory_is_invalid_request(self):
+        self.seed("adir/occupant.txt", b"x")
         self.assert_error(self.delete(self.build(), "adir"), 400, "invalid_request")
         self.assertTrue(os.path.isdir(os.path.join(self.root, "adir")))
 
@@ -499,6 +506,44 @@ class CopyTest(FilesystemTestCase):
     def test_missing_destination_directory_is_not_found(self):
         self.seed("a.txt")
         self.assert_error(self.copy(self.build(), "a.txt", "no/dir/b"), 404, "not_found")
+
+
+class TmpdirTest(FilesystemTestCase):
+    """filesystem-v1 §5.6: mkdtemp(3) under the root's scratch area."""
+
+    def tmpdir(self, client):
+        return client.post("/filesystem/v1/tmpdir")
+
+    def test_creates_a_fresh_private_directory(self):
+        self.addCleanup(os.umask, os.umask(0o022))
+        r = self.tmpdir(self.build())
+        self.assertEqual(r.status_code, 200, r.text)
+        rel = r.json()["path"]
+        self.assertTrue(rel.startswith("tmp/"), rel)
+        full = os.path.join(self.root, rel)
+        self.assertTrue(os.path.isdir(full))
+        self.assertEqual(stat.S_IMODE(os.stat(full).st_mode), 0o700)
+
+    def test_each_call_is_distinct(self):
+        client = self.build()
+        a = self.tmpdir(client).json()["path"]
+        b = self.tmpdir(client).json()["path"]
+        self.assertNotEqual(a, b)
+
+    def test_scratch_lifecycle(self):
+        client = self.build()
+        rel = self.tmpdir(client).json()["path"]
+        self.assertEqual(
+            self.write(client, f"{rel}/scratch.txt", b"work").status_code, 200
+        )
+        self.assertEqual(self.read(client, f"{rel}/scratch.txt").content, b"work")
+        # Populated: refuses to go...
+        self.assert_error(self.delete(client, rel), 400, "invalid_request")
+        # ...emptied: goes.
+        self.assertEqual(self.delete(client, f"{rel}/scratch.txt").status_code, 200)
+        r = self.delete(client, rel)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(os.path.exists(os.path.join(self.root, rel)))
 
 
 if __name__ == "__main__":

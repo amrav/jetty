@@ -1,14 +1,15 @@
-# jetty-fsspec
+# `jetty.fsspec` — fsspec backend for the `filesystem` module
 
-An [fsspec](https://filesystem-spec.readthedocs.io/) backend for the Jetty
-sidecar's [`filesystem` module](../../spec/filesystem-v1.md).
+An [fsspec](https://filesystem-spec.readthedocs.io/) backend for the
+sidecar's [`filesystem` module](../spec/filesystem-v1.md). Install the
+extra: `pip install jetty[fsspec]`.
 
-**Standalone by design.** This package depends on `fsspec` and the Python
-standard library, nothing else — in particular it does not import the jetty
-package. It speaks the published wire contract (`spec/filesystem-v1.md`)
-over HTTP, so it works against any conformant implementation, not just the
-reference sidecar. HTTP over the unix socket is done with `http.client`
-directly; there is no HTTP-library dependency.
+A client, not a module: nothing here runs inside the sidecar, and the
+sidecar never imports it. It talks to a **running** sidecar over the
+published wire contract, so it works against any conformant implementation,
+not just this repository's. The transport is `http.client` directly — over
+the sidecar's unix socket by default, TCP when configured — so `fsspec`
+itself is the only dependency the extra adds.
 
 ## Why
 
@@ -30,6 +31,9 @@ fs.cat_file("notes.txt")
 with fs.open("reports/q3.csv") as f:
     ...
 
+scratch = fs.gettmpdir()                 # fresh private dir, mkdtemp(3)
+fs.pipe_file(f"{scratch}/stage.parquet", blob)
+
 # or by URL, in any fsspec-aware library:
 pd.read_csv("jetty://reports/q3.csv",
             storage_options={"uds": "/run/jetty.sock"})
@@ -48,6 +52,12 @@ containment (filesystem-v1 §3).
 | `mv` | `POST /filesystem/v1/rename` (atomic, server-side) |
 | `cp_file` / `copy` | `POST /filesystem/v1/copy` |
 | `exists` / `info` | `HEAD /filesystem/v1/files/{path}` |
+| `gettmpdir` | `POST /filesystem/v1/tmpdir` |
+
+`gettmpdir` is this backend's extension — fsspec defines no scratch-space
+API. It has `mkdtemp(3)` semantics: each call returns a **new** private
+directory (mode `0700` server-side), so concurrent clients cannot collide
+in a shared scratch path.
 
 Errors map onto Python's own: `not_found` → `FileNotFoundError`,
 `permission_denied` → `PermissionError`, `invalid_request` → `ValueError`;
@@ -63,9 +73,7 @@ Everything follows from filesystem-v1 being a **whole-file** API:
 - There is no directory listing or stat, so `ls`, `glob`, `find`, `walk`,
   and friends raise `NotImplementedError`. `exists`/`info` answer for
   files, not directories.
-- Parent directories are not created (`mkdir` is not part of the wire
-  contract); writing into a missing directory raises `FileNotFoundError`.
-
-## Licence
-
-Apache-2.0.
+- Parent directories are not created (there is no general-purpose `mkdir`
+  on the wire); writing into a missing directory raises `FileNotFoundError`.
+  The one directory-creating call is `gettmpdir()`; its directory is
+  removable with `rm_file` once emptied.

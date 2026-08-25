@@ -32,6 +32,7 @@ import errno
 import os
 import secrets
 import stat as stat_module
+import tempfile
 
 from jetty.modules.filesystem.driver import (
     FileMissing,
@@ -159,11 +160,36 @@ class LocalFsDriver:
 
     def delete(self, path: str) -> None:
         full = self._resolve(path)
-        self._require(full, path)
         try:
-            os.unlink(full)
+            st = os.stat(full)
+        except FileNotFoundError:
+            raise FileMissing(f"no file at {path!r}") from None
         except OSError as exc:
             raise _translate(exc, path) from exc
+        try:
+            if stat_module.S_ISDIR(st.st_mode):
+                # The cleanup half of mkdtemp (filesystem-v1 §5.3): an empty
+                # directory goes by rmdir(2); a populated one is refused.
+                os.rmdir(full)
+            elif not stat_module.S_ISREG(st.st_mode):
+                raise InvalidTarget(f"{path!r} is not a regular file")
+            else:
+                os.unlink(full)
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                raise InvalidTarget(f"{path!r} is not empty") from exc
+            raise _translate(exc, path) from exc
+
+    def mkdtemp(self) -> str:
+        """filesystem-v1 §5.6: ``tmp/`` under the root on first use, then a
+        fresh mkdtemp(3) directory inside it — 0700, umask applied."""
+        area = os.path.join(os.path.realpath(self.root), "tmp")
+        try:
+            os.makedirs(area, exist_ok=True)
+            full = tempfile.mkdtemp(prefix="", dir=area)
+        except OSError as exc:
+            raise _translate(exc, "tmp") from exc
+        return "tmp/" + os.path.basename(full)
 
     def rename(self, src: str, dst: str) -> RenameResult:
         src_full = self._resolve(src)

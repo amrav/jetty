@@ -37,7 +37,7 @@ details stay internal.
 | `mail` module ([`spec/mail-v1.md`](spec/mail-v1.md)) — outbound mail relay | **Implemented, tested** (`spool` driver; delivery drivers are private) |
 | `filesystem` module ([`spec/filesystem-v1.md`](spec/filesystem-v1.md)) — whole-file read/write/rename/copy/delete with unix semantics (**experimental**) | **Implemented, tested** (`local` driver; drivers for other storage are private) |
 | `xmanager` | Name reserved only |
-| `jetty-fsspec` ([`clients/fsspec`](clients/fsspec)) — standalone Python client: [fsspec](https://filesystem-spec.readthedocs.io/) backend for the `filesystem` module | **Implemented, tested** (depends on `fsspec` only, not on jetty) |
+| `jetty.fsspec` ([docs](docs/fsspec.md)) — Python client: [fsspec](https://filesystem-spec.readthedocs.io/) backend for the `filesystem` module (`pip install jetty[fsspec]`) | **Implemented, tested** |
 | Orchestrator `jetty-orc` ([`docs/orchestrator.md`](docs/orchestrator.md)) — companion tool, not a module | **Implemented, tested** |
 
 Enabling an unimplemented module fails at boot with `unknown module` rather than
@@ -71,14 +71,14 @@ directory absltest hands out, so nothing assumes a writable `/tmp`.
 `run_all.py` rather than `unittest discover`: unittest never parses absl's
 flags, so every test that asks for a temp path would fail on `--test_tmpdir`.
 
-## Python client: `jetty-fsspec`
+## Python client: `jetty.fsspec`
 
-[`clients/fsspec`](clients/fsspec) is a **standalone** package — it depends
-on `fsspec` and the standard library, nothing else, and does not import
-jetty. It implements an [fsspec](https://filesystem-spec.readthedocs.io/)
-backend speaking `filesystem-v1`, so any fsspec-aware library (pandas,
-pyarrow, dask, …) can use a jetty-served tree in place of a local directory
-with no code changes:
+`jetty.fsspec` (the `fsspec` extra: `pip install jetty[fsspec]`) is an
+[fsspec](https://filesystem-spec.readthedocs.io/) backend speaking
+`filesystem-v1` — a client of the wire contract, not of the module's code,
+so it works against any conformant sidecar. Any fsspec-aware library
+(pandas, pyarrow, dask, …) can then use a jetty-served tree in place of a
+local directory with no code changes:
 
 ```python
 import fsspec
@@ -90,8 +90,8 @@ fs.cat_file("notes.txt")
 pd.read_csv("jetty://reports/q3.csv")      # any fsspec-aware library
 ```
 
-See [`clients/fsspec/README.md`](clients/fsspec/README.md) for the wire
-mapping and limitations (whole files only; no directory listing).
+See [`docs/fsspec.md`](docs/fsspec.md) for the wire mapping and limitations
+(whole files only; no directory listing).
 
 ## Orchestrator (`jetty-orc`)
 

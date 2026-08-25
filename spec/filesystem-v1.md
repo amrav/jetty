@@ -28,11 +28,13 @@ content at any level (SPEC.md §1.4 applied to data); paths **MAY** be logged.
 ## 1. Scope
 
 In scope: reading one file's entire content; writing — creating or replacing
-— one file's entire content; deleting one file; renaming one file; copying
-one file. Writes, renames, and copies land atomically (§2).
+— one file's entire content; deleting one file or one empty directory;
+renaming one file; copying one file; creating a scratch directory (§5.6).
+Writes, renames, and copies land atomically (§2).
 
 Deliberately out of scope for v1: directory listing; stat as a queryable
-resource; mkdir; byte ranges, streaming, and partial updates; permission
+resource; general-purpose mkdir (scratch directories, §5.6, are the only
+directory creation); byte ranges, streaming, and partial updates; permission
 changes (chmod/chown); locks and leases; watch/notify; extended attributes.
 
 ---
@@ -72,9 +74,11 @@ changes (chmod/chown); locks and leases; watch/notify; extended attributes.
   two-path ones — subject to the containment rule in §3. The namespace is
   transparent: a delete or rename addressed through a symlink acts on the
   resolved target, and the link itself stays.
-- **Regular files only.** Any path naming a directory, FIFO, socket, or
-  device node is `400 invalid_request` (a FIFO would otherwise block the
-  worker indefinitely — the refusal is deliberate, not an omission).
+- **Regular files only** for read, write, rename, and copy: any path naming
+  a directory, FIFO, socket, or device node is `400 invalid_request` (a FIFO
+  would otherwise block the worker indefinitely — the refusal is deliberate,
+  not an omission). Delete additionally accepts an **empty directory**
+  (`rmdir(2)`), so a scratch directory (§5.6) can be cleaned up.
 - **No locking.** Individual operations are atomic (above), but v1 defines
   no locks, leases, or transactions spanning operations; between requests,
   the last writer wins.
@@ -147,8 +151,10 @@ file. Creation and replacement per §2.
 
 ### 5.3 `DELETE /filesystem/v1/files/{path}` — delete one file
 
-`unlink(2)`. Deleting a file that does not exist is `404 not_found` — the
-truth of `ENOENT`, not an idempotent `200`.
+`unlink(2)` for a file; `rmdir(2)` for an **empty** directory — the cleanup
+half of §5.6's scratch directories. A non-empty directory is
+`400 invalid_request`. Deleting a path that does not exist is
+`404 not_found` — the truth of `ENOENT`, not an idempotent `200`.
 
 `200`:
 
@@ -194,6 +200,26 @@ integrity. Copying a file onto itself (after symlink resolution) is
 { "size": 2048, "created": false }
 ```
 
+### 5.6 `POST /filesystem/v1/tmpdir` — a fresh scratch directory
+
+`mkdtemp(3)` semantics: creates the scratch area `tmp/` under the root on
+first use, then a fresh, uniquely-named directory inside it — mode `0700`
+as modified by the umask — and returns its path, ready for §5.2 writes.
+Each call returns a new directory, private to its caller by construction;
+this is the deliberate alternative to handing every client one shared
+scratch path and inheriting its collisions. The request takes no body.
+
+`200`:
+
+```json
+{ "path": "tmp/k2x9a3f8" }
+```
+
+Nothing expires a scratch directory: cleanup is the caller's, by deleting
+its files (§5.3) and then the directory itself (empty-directory delete,
+§5.3). A deployment may of course place `root` on storage with its own
+expiry.
+
 ---
 
 ## 6. Errors
@@ -208,7 +234,7 @@ Standard mapping:
 
 | Condition | Response |
 |---|---|
-| Path fails §3's rules or resolves outside the root; path names something other than a regular file; symlink loop; a rename that would cross a filesystem boundary; a copy of a file onto itself | `400 invalid_request` |
+| Path fails §3's rules or resolves outside the root; path names something other than a regular file; symlink loop; a rename that would cross a filesystem boundary; a copy of a file onto itself; a delete of a non-empty directory | `400 invalid_request` |
 | No file at the path, or a missing directory on the way to it | `404 not_found` |
 | Any other filesystem failure (`EIO`, `ENOSPC`, …) | `503 upstream_unavailable` |
 
@@ -227,6 +253,7 @@ class FsDriver(Protocol):
     def delete(self, path: str) -> None: ...
     def rename(self, src: str, dst: str) -> RenameResult: ...
     def copy(self, src: str, dst: str) -> WriteResult: ...
+    def mkdtemp(self) -> str: ...          # §5.6; returns the relative path
 ```
 
 Methods are synchronous — a driver does blocking I/O, and the surface keeps

@@ -1,16 +1,16 @@
-"""fsspec backend for the Jetty sidecar's ``filesystem`` module.
+"""fsspec backend for the sidecar's ``filesystem`` module.
 
-Standalone by design: this package depends on ``fsspec`` and the standard
-library, nothing else — in particular it does not import the jetty package.
-It speaks the published wire contract (spec/filesystem-v1.md) over HTTP, so
-it works against any conformant implementation, not just the reference
-sidecar. The transport is ``http.client`` directly — over the sidecar's
-unix socket by default, TCP when configured — so there is no HTTP-library
-dependency either.
+A client, not a module: nothing here runs inside the sidecar, and the
+sidecar never imports it. It talks to a *running* sidecar over the
+published wire contract (spec/filesystem-v1.md), so it works against any
+conformant implementation, not just this repository's. The transport is
+``http.client`` directly — over the sidecar's unix socket by default, TCP
+when configured. Needs the ``fsspec`` extra: ``pip install jetty[fsspec]``.
 
 Scope follows filesystem-v1 being a whole-file API: reads and writes buffer
 the entire file, ``mv``/``cp_file`` are the sidecar's atomic server-side
-rename/copy, and there is no directory listing — ``ls`` and everything built
+rename/copy, ``gettmpdir()`` returns a fresh server-created scratch
+directory, and there is no directory listing — ``ls`` and everything built
 on it raise ``NotImplementedError``.
 """
 
@@ -26,7 +26,6 @@ from urllib.parse import quote
 from fsspec import register_implementation
 from fsspec.spec import AbstractFileSystem
 
-__version__ = "0.1.0"
 __all__ = ["JettyFileSystem"]
 
 #: The sidecar's default control listener (SPEC.md §2.1).
@@ -206,6 +205,21 @@ class JettyFileSystem(AbstractFileSystem):
     def cp_file(self, path1: str, path2: str, **kwargs: Any) -> None:
         """Server-side copy: the content never crosses to the client."""
         self._two_path("copy", path1, path2)
+
+    def gettmpdir(self) -> str:
+        """A fresh private scratch directory on the sidecar.
+
+        ``mkdtemp(3)`` semantics, deliberately: each call returns a NEW
+        uniquely-named directory (mode 0700 server-side), so concurrent
+        clients cannot collide in a shared scratch path. Write into it with
+        ordinary paths under the returned prefix; clean up by removing its
+        files and then the directory itself (``rm_file`` works on an empty
+        directory).
+        """
+        status, data, _ = self._request("POST", f"{_MOUNT}/tmpdir")
+        if status != 200:
+            self._raise(status, data, "tmpdir")
+        return json.loads(data)["path"]
 
     # --- metadata, within what a whole-file API can say -----------------
 

@@ -240,4 +240,10 @@ class FilesystemModule(Module):
             )
             return {"size": result.size, "created": result.created}
 
+        @router.post("/tmpdir")
+        async def tmpdir() -> dict[str, Any]:
+            path = await self._dispatch(self.driver.mkdtemp)
+            log.info("filesystem tmpdir path=%s", path)
+            return {"path": path}
+
         return router
