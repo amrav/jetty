@@ -235,6 +235,44 @@ class ListIssuesTest(TrackerTestCase):
                 "INVALID_ARGUMENT",
             )
 
+    def test_forward_headers_reach_the_driver_and_default_to_none(self):
+        # issuetracker-v1 §3: only the configured header names are bound for
+        # the driver, verbatim; with no configuration nothing ever is, even
+        # when the client sends credentials.
+        from jetty.modules.issuetracker.driver import forwarded_headers
+
+        seen: list[dict] = []
+
+        def spy(module):
+            inner = module.driver.create_comment
+
+            async def create_comment(issue_id, text):
+                seen.append(dict(forwarded_headers.get()))
+                return await inner(issue_id, text)
+
+            module.driver.create_comment = create_comment
+
+        with self.build(forward_headers=["authorization"]) as c:
+            spy(self.app.state.jetty.modules[0])
+            r = c.post(
+                f"/issuetracker/v1/issues/{CRASH_SAVE}/comments",
+                json={"comment": "as the caller"},
+                headers={"Authorization": "Bearer caller-token", "x-api-key": "noise"},
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(seen, [{"authorization": "Bearer caller-token"}])
+
+        seen.clear()
+        with self.build() as c:  # default: nothing forwarded
+            spy(self.app.state.jetty.modules[0])
+            r = c.post(
+                f"/issuetracker/v1/issues/{CRASH_SAVE}/comments",
+                json={"comment": "service identity"},
+                headers={"Authorization": "Bearer caller-token"},
+            )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(seen, [{}])
+
     def test_order_by_sorts_on_modified_time_not_modified(self):
         # The tracker's sort field is `modified_time` (the response *key* is
         # `modifiedTime`); `modified` is not a field there. Rejecting it is

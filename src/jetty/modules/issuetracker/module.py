@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from jetty.modules.base import Module
 from jetty.modules.issuetracker.driver import (
     Attachment,
+    forwarded_headers,
     Comment,
     Component,
     DriverRejects,
@@ -153,6 +154,10 @@ class TrackerSettings(_Strict):
     enabled: bool = False
     driver: str = "mock"
     identity: str = "jetty@example.com"
+    #: Incoming request headers forwarded to the driver, by name
+    #: (issuetracker-v1 §3): for drivers whose upstream authenticates each
+    #: caller. Empty = nothing is ever forwarded, the fail-closed default.
+    forward_headers: list[str] = Field(default_factory=list)
     seed: TrackerSeed = Field(default_factory=TrackerSeed)
 
 
@@ -556,7 +561,32 @@ class IssueTrackerModule(Module):
         return result
 
     def router(self) -> APIRouter:  # noqa: C901 - one route per emulated method
-        router = APIRouter(route_class=_TrackerRoute)
+        names = [n.lower() for n in self.config.forward_headers]
+
+        class _ForwardingRoute(_TrackerRoute):
+            """_TrackerRoute plus the §3 header forwarding: the configured
+            headers are bound for the duration of each request, so every
+            driver call under it sees the caller's credential — and nothing
+            else, ever (SPEC.md §1.4)."""
+
+            def get_route_handler(self):  # type: ignore[override]
+                handler = super().get_route_handler()
+
+                async def wrapped(request: Request) -> Response:
+                    selected = {
+                        name: value
+                        for name in names
+                        if (value := request.headers.get(name)) is not None
+                    }
+                    token = forwarded_headers.set(selected)
+                    try:
+                        return await handler(request)
+                    finally:
+                        forwarded_headers.reset(token)
+
+                return wrapped
+
+        router = APIRouter(route_class=_ForwardingRoute)
 
         # --- components -----------------------------------------------
         @router.get("/v1/components/{component_id}")
