@@ -419,7 +419,9 @@ def _service_pids(record: dict, sname: str) -> list[int]:
 def _cmd_ps(args: argparse.Namespace) -> None:
     """The full process tree, service by service — every pid the containment
     can enumerate, which under cgroup mode is every pid there is. Rendered
-    pstree-style, with the same per-service colours as `logs` and `up`."""
+    pstree-style, every line `[service]`-prefixed with the same colours as
+    `logs` and `up`, with per-process CPU sampled over one shared interval
+    (the `ls` approach, per pid)."""
     root = Path(args.root) if args.root else default_root()
     record = _resolve_instance(Registry(root), args.name)
     alive = supervisor_alive(record)
@@ -432,11 +434,28 @@ def _cmd_ps(args: argparse.Namespace) -> None:
         f"containment {cont.get('kind')}"
         + (f" ({cont.get('root')})" if cont.get("root") else "")
     )
-    for sname in services:
-        pids = set(_service_pids(record, sname))
-        print(prefixer.label(sname) + ("" if pids else "  (no processes)"))
+    # Enumerate everything first, then sample CPU twice across ONE sleep so
+    # every process's percentage covers the same window.
+    svc_pids = {sname: sorted(set(_service_pids(record, sname))) for sname in services}
+    all_pids = [pid for pids in svc_pids.values() for pid in pids]
+    before = {pid: procfs.cpu_ticks([pid]) for pid in all_pids}
+    t0 = time.monotonic()
+    if all_pids:
+        time.sleep(0.3)
+    dt = time.monotonic() - t0
+
+    def cpu_percent(pid: int) -> str:
+        if not procfs.alive(pid):  # died mid-sample; ticks would read as 0
+            return "-"
+        sample = _CpuSample(ticks=procfs.cpu_ticks([pid]))
+        pct = sample.percent_since(_CpuSample(ticks=before[pid]), dt)
+        return pct if pct == "-" else f"{pct}%"
+
+    for sname, pids in svc_pids.items():
+        if not pids:
+            print(prefixer.format(sname, "(no processes)"))
         children: dict[int | None, list[int]] = {}
-        for pid in sorted(pids):
+        for pid in pids:
             parent = procfs.ppid(pid)
             children.setdefault(parent if parent in pids else None, []).append(pid)
 
@@ -444,8 +463,12 @@ def _cmd_ps(args: argparse.Namespace) -> None:
             for i, pid in enumerate(nodes):
                 last = i == len(nodes) - 1
                 rss = _human_bytes(procfs.rss_bytes([pid]))
+                cpu = cpu_percent(pid)
                 cmd = procfs.cmdline(pid)
-                print(f" {prefix}{'└─ ' if last else '├─ '}{pid:<7} {rss:>9}  {cmd}")
+                print(prefixer.format(
+                    sname,
+                    f"{prefix}{'└─ ' if last else '├─ '}{pid:<7} {rss:>9} {cpu:>6}  {cmd}",
+                ))
                 render(children.get(pid, []), prefix + ("   " if last else "│  "))
 
         render(children.get(None, []), "")

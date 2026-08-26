@@ -295,6 +295,9 @@ after = ["web"]
         parent_line, child_line = (
             line for line in output.splitlines() if "tree.py" in line or "sleep" in line
         )
+        for line in (parent_line, child_line):
+            self.assertStartsWith(line, "[tree")  # service name prefixes every row
+            self.assertRegex(line, r"\d+\.\d%")  # sampled per-process CPU column
         self.assertIn("─ ", parent_line)  # pstree-style branch glyphs
         self.assertLess(
             parent_line.index("─ "),
