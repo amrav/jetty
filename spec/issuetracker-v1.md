@@ -71,8 +71,16 @@ Consequently:
 - The surface **MUST NOT** require OAuth, an API key, or any credential.
 - Stock clients of the emulated API attach an `Authorization` header, an
   `x-goog-api-key` header, or a `key` query parameter. The surface **MUST**
-  accept and ignore all three, and **MUST NOT** forward them to the driver or
-  any upstream (SPEC.md §1.4 applies to them regardless).
+  accept all three and, by default, ignore them: **MUST NOT** forward them to
+  the driver or any upstream (SPEC.md §1.4 applies to them regardless).
+- `forward_headers` (configuration; default empty) names incoming request
+  headers the surface passes to the driver **verbatim**, bound to the request
+  they arrived on. This is for deployments whose upstream authenticates or
+  attributes each caller: the caller supplies its own credential and the
+  driver presents it upstream. Headers not named are never forwarded, and the
+  forwarded values **MUST NOT** be logged or echoed in any response
+  (SPEC.md §1.4). With `forward_headers` empty the previous rule applies in
+  full.
 - The module defines no per-caller identity. Where the emulated API attributes
   an action to the calling user (`reporter` of a created issue, `author` of a
   comment or issue update), the attribution is the driver's concern (e.g. a
@@ -174,7 +182,10 @@ untouched. A modification that names no masked field and carries no comment
 is the emulated `INVALID_ARGUMENT` error.
 
 `issues.comments.create` appends a comment; `issues.comments.update` replaces
-the body of comment `{commentNumber}`. The upstream's comment history
+the body of comment `{commentNumber}`. A comment carries `author` — the
+upstream's recorded commenter, in the same user shape as `reporter` and
+`assignee` — absent when the upstream records none; per §3 it is reported
+exactly as recorded, never synthesised. The upstream's comment history
 semantics (whether prior versions remain visible) are the upstream's; the
 surface does not restate them.
 

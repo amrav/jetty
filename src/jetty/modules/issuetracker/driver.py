@@ -23,6 +23,8 @@ success (SPEC.md §1.2).
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -146,6 +148,9 @@ class Comment:
     issue_id: int
     number: int                    # 1-based; 1 is the description
     text: str
+    #: The upstream's recorded commenter (issuetracker-v1 §4.3), "" when the
+    #: upstream records none. Reported verbatim, never synthesised.
+    author: str = ""
 
 
 @dataclass
@@ -201,6 +206,17 @@ class HotlistEntry:
 
 
 # --- the protocol -----------------------------------------------------------
+
+#: Request headers the surface was configured to forward (issuetracker-v1
+#: §3), bound around each driver call. A driver whose upstream authenticates
+#: per caller reads them; drivers with a service identity (the mock) ignore
+#: them. A ContextVar rather than a parameter: it is per-request state, not
+#: part of any operation's meaning, and threading it through every method
+#: would put transport detail into the domain interface.
+forwarded_headers: ContextVar[dict[str, str]] = ContextVar(
+    "issuetracker_forwarded_headers", default={}
+)
+
 
 class IssueTrackerDriver(Protocol):
     async def get_component(self, component_id: int) -> Component | None: ...

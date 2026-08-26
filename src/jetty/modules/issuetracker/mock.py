@@ -149,7 +149,8 @@ class MockIssueTrackerDriver:
         )
         self._issues[issue_id] = issue
         self._comments[issue_id] = [
-            Comment(issue_id=issue_id, number=1, text=req.description)
+            # comment 1 is the description; its author is the reporter
+            Comment(issue_id=issue_id, number=1, text=req.description, author=reporter)
         ]
         self._updates[issue_id] = []
         return issue
@@ -319,7 +320,9 @@ class MockIssueTrackerDriver:
         if issue is None:
             return None
         rows = self._comments[issue_id]
-        comment = Comment(issue_id=issue_id, number=len(rows) + 1, text=text)
+        comment = Comment(
+            issue_id=issue_id, number=len(rows) + 1, text=text, author=self._identity
+        )
         rows.append(comment)
         self._touch(issue)
         return comment
