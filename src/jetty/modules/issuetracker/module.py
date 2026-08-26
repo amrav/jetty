@@ -311,8 +311,18 @@ def _parse_view(view: str | None) -> str:
     raise TrackerApiError("INVALID_ARGUMENT", f"view: unsupported {view!r}")
 
 
-#: orderBy fields the interface sorts on (issuetracker-v1 §4.2).
-_ORDER_FIELDS = {"priority", "severity", "created", "modified", "assignee"}
+#: orderBy fields the interface sorts on (issuetracker-v1 §4.2): wire name ->
+#: the driver's field. The tracker sorts on `modified_time` — the response
+#: *key* is `modifiedTime`, but a bare `modified` is not a sort field there.
+#: The emulation must reject what the real API rejects: accepting the nicer
+#: spelling is exactly how a client bug once survived the mock.
+_ORDER_FIELDS = {
+    "priority": "priority",
+    "severity": "severity",
+    "created": "created",
+    "modified_time": "modified",
+    "assignee": "assignee",
+}
 
 
 def _parse_order_by(order_by: str | None) -> list[tuple[str, bool]]:
@@ -326,7 +336,7 @@ def _parse_order_by(order_by: str | None) -> list[tuple[str, bool]]:
         direction = words[1].lower() if len(words) == 2 else "asc"
         if direction not in ("asc", "desc"):
             raise TrackerApiError("INVALID_ARGUMENT", f"orderBy: unsupported {part.strip()!r}")
-        parsed.append((words[0], direction == "desc"))
+        parsed.append((_ORDER_FIELDS[words[0]], direction == "desc"))
     return parsed
 
 

@@ -145,7 +145,10 @@ API's (§1):
   cannot evaluate follows §4.6 — it is never silently dropped.
 - `orderBy` — a sort field with optional direction, ascending by default,
   e.g. `priority asc, created desc`. Sortable fields follow the emulated API
-  (priority, severity, created, modified, assignee, verifier, …).
+  (priority, severity, created, modified_time, assignee, …) — note the
+  tracker's sort field is `modified_time` although the response key is
+  `modifiedTime`; an implementation **MUST NOT** accept spellings the
+  emulated API rejects.
 - `pageSize` (default 25, maximum 500) and `pageToken`; responses carry
   `nextPageToken` when more results exist and `totalSize` as an
   approximation.
