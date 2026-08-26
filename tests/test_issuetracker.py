@@ -235,6 +235,24 @@ class ListIssuesTest(TrackerTestCase):
                 "INVALID_ARGUMENT",
             )
 
+    def test_order_by_sorts_on_modified_time_not_modified(self):
+        # The tracker's sort field is `modified_time` (the response *key* is
+        # `modifiedTime`); `modified` is not a field there. Rejecting it is
+        # the point: the nicer spelling once let a client bug survive the
+        # mock and fail only against the real tracker.
+        with self.build() as c:
+            newest = self.list_issues(c, "componentid:100", orderBy="modified_time desc")
+            stamps = [i["modifiedTime"] for i in newest["issues"]]
+            self.assertEqual(stamps, sorted(stamps, reverse=True))
+            self.assert_tracker_error(
+                c.get(
+                    "/issuetracker/v1/issues",
+                    params={"query": "componentid:100", "orderBy": "modified desc"},
+                ),
+                400,
+                "INVALID_ARGUMENT",
+            )
+
     def test_pagination_pages_through_with_stable_total(self):
         with self.build() as c:
             first = self.list_issues(c, "componentid:100", pageSize=2)
