@@ -182,7 +182,10 @@ untouched. A modification that names no masked field and carries no comment
 is the emulated `INVALID_ARGUMENT` error.
 
 `issues.comments.create` appends a comment; `issues.comments.update` replaces
-the body of comment `{commentNumber}`. The upstream's comment history
+the body of comment `{commentNumber}`. A comment carries `author` — the
+upstream's recorded commenter, in the same user shape as `reporter` and
+`assignee` — absent when the upstream records none; per §3 it is reported
+exactly as recorded, never synthesised. The upstream's comment history
 semantics (whether prior versions remain visible) are the upstream's; the
 surface does not restate them.
 

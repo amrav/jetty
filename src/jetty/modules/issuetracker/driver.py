@@ -148,6 +148,9 @@ class Comment:
     issue_id: int
     number: int                    # 1-based; 1 is the description
     text: str
+    #: The upstream's recorded commenter (issuetracker-v1 §4.3), "" when the
+    #: upstream records none. Reported verbatim, never synthesised.
+    author: str = ""
 
 
 @dataclass

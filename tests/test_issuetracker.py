@@ -273,6 +273,25 @@ class ListIssuesTest(TrackerTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(seen, [{}])
 
+    def test_comments_carry_their_author(self):
+        # issuetracker-v1 §4.3: a comment names its recorded commenter, in the
+        # same user shape as reporter/assignee; the description (comment 1)
+        # was written by the reporter.
+        with self.build(identity="relay@corp.example") as c:
+            r = c.post(
+                f"/issuetracker/v1/issues/{CRASH_SAVE}/comments",
+                json={"comment": "who wrote this"},
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(
+                r.json()["author"], {"emailAddress": "relay@corp.example"}
+            )
+            listed = c.get(f"/issuetracker/v1/issues/{CRASH_SAVE}/comments").json()
+        by_number = {c["commentNumber"]: c for c in listed["issueComments"]}
+        self.assertEqual(
+            by_number[max(by_number)]["author"], {"emailAddress": "relay@corp.example"}
+        )
+
     def test_order_by_sorts_on_modified_time_not_modified(self):
         # The tracker's sort field is `modified_time` (the response *key* is
         # `modifiedTime`); `modified` is not a field there. Rejecting it is

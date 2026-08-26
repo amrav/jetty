@@ -196,11 +196,14 @@ def _parse_user(value: Any, field_name: str) -> str:
 
 
 def _comment_json(comment: Comment) -> dict:
-    return {
+    body = {
         "issueId": str(comment.issue_id),
         "commentNumber": comment.number,
         "comment": comment.text,
     }
+    if comment.author:
+        body["author"] = _user_json(comment.author)
+    return body
 
 
 def _issue_json(issue: Issue, view: str) -> dict:
