@@ -979,6 +979,60 @@ backoff_initial_seconds = 0.05
         with open(os.path.join(record["logs_dir"], "resolver-app.log")) as f:
             self.assertIn("release feed is down", f.read())
 
+    def test_resolver_forked_child_cannot_outlive_the_timeout(self):
+        """A resolver that forks a background child sharing its stdout/stderr
+        never delivers EOF on the pipes. Resolution must still fail within
+        timeout_seconds: the deadline has to cover the pipe drain (and a
+        Process.wait() that waits on pipe disconnection), not just the
+        process exit."""
+        config = self.write_config(
+            """
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[resolvers.app]
+cmd = ["sh", "-c", "sleep 30 & echo /bin/true"]
+timeout_seconds = 1.0
+
+[services.app]
+cmd = ["{bin.app}"]
+[services.app.restart]
+max_restarts = 1
+backoff_initial_seconds = 0.05
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        rc = proc.wait(timeout=30)
+        output = self.output_of(proc)
+        self.assertEqual(rc, 1, output)
+        self.assertIn("timed out after 1.0s", output)
+
+    def test_service_forked_child_does_not_stall_the_exit_path(self):
+        """A service that exits leaving a background child sharing its stdout
+        keeps the log pipe open: Process.wait() then never resolves (it waits
+        for pipe disconnection too) and an unswept log drain never sees EOF.
+        Exit detection must not depend on the pipe, and the post-exit sweep
+        must run before the drain — otherwise the incarnation is permanently
+        stuck instead of failing or restarting."""
+        config = self.write_config(
+            """
+[instance]
+name = "dev"
+containment = "pgroup"
+
+[services.forky]
+cmd = ["sh", "-c", "sleep 300 & exit 7"]
+[services.forky.restart]
+no_restart_exit = [7]
+"""
+        )
+        proc = self.orc("up", "-c", config)
+        rc = proc.wait(timeout=30)
+        output = self.output_of(proc)
+        self.assertEqual(rc, 1, output)
+        self.assertIn("not worth retrying", output)
+
     def test_everything_defaults_to_the_config_files_directory(self):
         """Config in a subdir, supervisor launched from outside it: the
         resolver reads its sibling manifest, and the service's default cwd is
