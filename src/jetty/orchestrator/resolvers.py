@@ -336,21 +336,39 @@ class Resolvers:
         stdout_task = asyncio.create_task(read_stdout())
         stderr_task = asyncio.create_task(pump_stderr())
         try:
-            await asyncio.wait_for(proc.wait(), cfg.timeout_seconds)
+            # The deadline covers the pipe drain, not just process exit: a
+            # resolver that forks a background child sharing its stdout or
+            # stderr never delivers EOF, so a drain awaited outside the
+            # timeout could stall long past any deadline.
+            await asyncio.wait_for(
+                asyncio.gather(proc.wait(), stdout_task, stderr_task),
+                cfg.timeout_seconds,
+            )
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            exited = proc.returncode is not None
+            if not exited:
+                proc.kill()
             for task in (stdout_task, stderr_task):
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            # Not proc.wait(): that also waits for the pipes to disconnect,
+            # which a forked child that inherited them can postpone forever.
+            # SIGKILL guarantees the exit; the loop just waits for the reap.
+            while proc.returncode is None:
+                await asyncio.sleep(0.01)
             raise ResolveError(
                 f"resolver {rname!r} timed out after {cfg.timeout_seconds}s"
+                + (
+                    " (the process exited, but something it spawned still "
+                    "holds its stdout/stderr open)"
+                    if exited
+                    else ""
+                )
             )
-        stdout = await stdout_task
-        await stderr_task
+        stdout = stdout_task.result()
         if proc.returncode != 0:
             tail = stderr_tail.decode(errors="replace").strip()[-_STDERR_TAIL:]
             raise ResolveError(

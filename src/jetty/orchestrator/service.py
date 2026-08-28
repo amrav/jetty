@@ -39,6 +39,13 @@ from .resolvers import ResolveError
 _TAIL_BYTES = 8192
 _PROBE_ATTEMPT_TIMEOUT = 2.0
 _WATCH_POLL_SECONDS = 1.0
+#: How often to poll for process exit (see `_wait_exit`).
+_EXIT_POLL_SECONDS = 0.05
+#: How long to wait for the log pipe to drain after the post-exit sweep. The
+#: sweep kills everything containment can see, which closes the pipe; only an
+#: escapee (a setsid grandchild under pgroup containment) can keep it open,
+#: and its future output is not this incarnation's to record.
+_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 #: A watched tree wider than this polls a lot of inodes every second; the
@@ -46,6 +53,17 @@ _WATCH_POLL_SECONDS = 1.0
 _WATCH_WIDE_TREE = 10_000
 
 Signature = tuple[int, int, int] | tuple[str, str]
+
+
+async def _wait_exit(proc: asyncio.subprocess.Process) -> int:
+    """Wait for the process ITSELF to exit — unlike `Process.wait()`, which
+    resolves only once the process's pipes have disconnected too, so a
+    background child that inherited stdout would postpone it indefinitely.
+    The reaped exit code is recorded at actual exit regardless of pipes;
+    poll for it."""
+    while proc.returncode is None:
+        await asyncio.sleep(_EXIT_POLL_SECONDS)
+    return proc.returncode
 
 
 def _path_sig(path: str) -> tuple[Signature | None, int]:
@@ -269,15 +287,25 @@ class Service:
             return  # between incarnations; the next spawn re-resolves anyway
         self._bounce_requested = True
         self._log_note(f"restarting: {reason}")
+        proc = self.proc
         await self._terminate_group()
-        self._containment.sweep(self.name, signal.SIGKILL)
+        if proc.returncode is None:
+            # Escalate only while the OLD incarnation is still alive. Past
+            # its exit the run loop may already have swept and respawned, and
+            # the sweep targets whatever session is registered for the name
+            # NOW — firing it late would kill the fresh incarnation and turn
+            # this budget-free bounce into a crash. (Post-exit stragglers are
+            # the run loop's own sweep's job, which runs before any respawn.)
+            self._containment.sweep(self.name, signal.SIGKILL)
 
     async def _terminate_group(self) -> None:
         assert self.proc is not None
         sig = getattr(signal, "SIG" + self._cfg.stop.signal)
         self._containment.sweep(self.name, sig)
         try:
-            await asyncio.wait_for(self.proc.wait(), self._cfg.stop.grace_seconds)
+            await asyncio.wait_for(
+                _wait_exit(self.proc), self._cfg.stop.grace_seconds
+            )
         except TimeoutError:
             self._log_note(
                 f"no exit {self._cfg.stop.grace_seconds}s after "
@@ -323,7 +351,7 @@ class Service:
             if await self._wait_ready():
                 self._set_state("running")
                 self.ready_event.set()
-            code = await self.proc.wait()
+            code = await _wait_exit(self.proc)
         finally:
             for watcher in watchers:
                 watcher.cancel()
@@ -331,16 +359,24 @@ class Service:
                     await watcher
                 except asyncio.CancelledError:
                     pass
+        # Sweep survivors of this incarnation BEFORE draining the log pipe:
+        # a leftover child shares the service's stdout, and until it dies the
+        # pipe never reaches EOF.
+        self._containment.sweep(self.name, signal.SIGKILL)
         if self._reader_task is not None:
-            await self._reader_task
+            try:
+                await asyncio.wait_for(self._reader_task, _DRAIN_TIMEOUT_SECONDS)
+            except TimeoutError:
+                self._log_note(
+                    "output pipe still open after the post-exit sweep (an "
+                    "escaped child?); abandoning the drain"
+                )
             self._reader_task = None
         if self._logf is not None:
             self._logf.close()
             self._logf = None
         self.ready_event.clear()
         self.pid = None
-        # Sweep survivors of this incarnation before any restart.
-        self._containment.sweep(self.name, signal.SIGKILL)
         return code
 
     async def _spawn(self) -> str | None:
