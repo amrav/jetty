@@ -84,10 +84,10 @@ local directory with no code changes:
 import fsspec
 
 fs = fsspec.filesystem("jetty")            # default socket; uds=/tcp= to point elsewhere
-fs.pipe_file("notes.txt", b"hello")
-fs.cat_file("notes.txt")
+fs.pipe_file("/srv/files/notes.txt", b"hello")     # paths are absolute
+fs.cat_file("/srv/files/notes.txt")
 
-pd.read_csv("jetty://reports/q3.csv")      # any fsspec-aware library
+pd.read_csv("jetty:///srv/files/reports/q3.csv")   # any fsspec-aware library
 ```
 
 See [`docs/fsspec.md`](docs/fsspec.md) for the wire mapping and limitations

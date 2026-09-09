@@ -33,8 +33,9 @@ class PermissionDenied(Exception):
 
 class InvalidTarget(Exception):
     """The path is syntactically fine but names something unservable: it
-    resolves outside the driver's authority, hits a symlink loop, or is not
-    a regular file → ``400 invalid_request``."""
+    resolves outside the driver's authority (the root and the scratch
+    directories this process created, filesystem-v1 §3), hits a symlink
+    loop, or is not a regular file → ``400 invalid_request``."""
 
 
 @dataclass
@@ -66,8 +67,9 @@ class FsDriver(Protocol):
     def delete(self, path: str) -> None: ...
     def rename(self, src: str, dst: str) -> RenameResult: ...
     def copy(self, src: str, dst: str) -> WriteResult: ...
-    #: filesystem-v1 §5.6: a fresh private scratch directory under the
-    #: store's scratch area; returns its relative path.
+    #: filesystem-v1 §5.6: a fresh private scratch directory outside the
+    #: root, remembered by this driver so later paths under it are admitted;
+    #: returns its absolute path, exactly as clients will address it.
     def mkdtemp(self) -> str: ...
     #: filesystem-v1 §5.7: metadata for any existing object, symlinks
     #: followed. The regular-files-only rule deliberately does not apply.

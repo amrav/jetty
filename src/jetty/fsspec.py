@@ -13,6 +13,10 @@ rename/copy, ``gettmpdir()`` returns a fresh server-created scratch
 directory, and there is no directory listing — ``ls`` and everything built
 on it raise ``NotImplementedError``.
 
+Paths are absolute (filesystem-v1 §3): ``jetty:///srv/files/a.txt`` names
+``/srv/files/a.txt`` on the sidecar's host, and the sidecar admits it only
+inside its root or a scratch directory it handed out.
+
 When the sidecar does not offer the module — jetty modules are opt-in, and
 disabled is the default — the backend falls back to the normal local
 filesystem (configurable: ``local_fallback``), so the same ``jetty://``
@@ -96,14 +100,14 @@ class JettyFileSystem(AbstractFileSystem):
     local_fallback:
         When the sidecar is reachable but does not offer the filesystem
         module (disabled or an older build), operate on the normal local
-        filesystem instead — same relative paths, resolved against the
-        working directory. Default True. Set False to require the remote
+        filesystem instead — the same absolute paths, opened directly.
+        Default True. Set False to require the remote
         module and fail loudly. An unreachable sidecar always raises,
         either way.
     """
 
     protocol = "jetty"
-    root_marker = ""
+    root_marker = "/"
 
     def __init__(
         self,
@@ -124,9 +128,14 @@ class JettyFileSystem(AbstractFileSystem):
         #: False = it does not (fallback or strict error per config).
         self._remote: bool | None = None
 
-    @classmethod
-    def _strip_protocol(cls, path: str) -> str:
-        return super()._strip_protocol(path).lstrip("/")
+    @staticmethod
+    def _local(path: str) -> str:
+        """The fallback keeps the wire's one syntax rule the sidecar would
+        enforce — absolute paths only — so code written against the
+        fallback does not break the day the module is enabled."""
+        if not path.startswith("/"):
+            raise ValueError(f"{path}: filesystem-v1 paths are absolute")
+        return path
 
     # --- transport ------------------------------------------------------
 
@@ -219,7 +228,7 @@ class JettyFileSystem(AbstractFileSystem):
     ) -> bytes:
         path = self._strip_protocol(path)
         if not self._is_remote():
-            with open(path, "rb") as f:
+            with open(self._local(path), "rb") as f:
                 data = f.read()
         else:
             status, data, _ = self._request("GET", self._file_url(path))
@@ -233,7 +242,7 @@ class JettyFileSystem(AbstractFileSystem):
     def pipe_file(self, path: str, value: bytes, **kwargs: Any) -> None:
         path = self._strip_protocol(path)
         if not self._is_remote():
-            with open(path, "wb") as f:
+            with open(self._local(path), "wb") as f:
                 f.write(bytes(value))
             return
         status, data, _ = self._request(
@@ -245,6 +254,7 @@ class JettyFileSystem(AbstractFileSystem):
     def rm_file(self, path: str) -> None:
         path = self._strip_protocol(path)
         if not self._is_remote():
+            self._local(path)
             if os.path.isdir(path):
                 os.rmdir(path)  # matches the wire: empty directories only
             else:
@@ -269,7 +279,10 @@ class JettyFileSystem(AbstractFileSystem):
     def mv(self, path1: str, path2: str, **kwargs: Any) -> None:
         """Atomic server-side rename(2) — never download-reupload-delete."""
         if not self._is_remote():
-            os.replace(self._strip_protocol(path1), self._strip_protocol(path2))
+            os.replace(
+                self._local(self._strip_protocol(path1)),
+                self._local(self._strip_protocol(path2)),
+            )
             return
         self._two_path("rename", path1, path2)
 
@@ -277,7 +290,8 @@ class JettyFileSystem(AbstractFileSystem):
         """Server-side copy: the content never crosses to the client."""
         if not self._is_remote():
             shutil.copyfile(
-                self._strip_protocol(path1), self._strip_protocol(path2)
+                self._local(self._strip_protocol(path1)),
+                self._local(self._strip_protocol(path2)),
             )
             return
         self._two_path("copy", path1, path2)
@@ -287,16 +301,17 @@ class JettyFileSystem(AbstractFileSystem):
 
         ``mkdtemp(3)`` semantics, deliberately: each call returns a NEW
         uniquely-named directory, so concurrent clients cannot collide in a
-        shared scratch path. The returned path is opaque — where the scratch
-        area lives is the sidecar implementation's choice. Write into it
-        with ordinary paths under the returned prefix; clean up by removing
-        its files and then the directory itself (``rm_file`` works on an
-        empty directory).
+        shared scratch path. The returned path is absolute and opaque —
+        where scratch space lives is the sidecar implementation's choice —
+        and it is valid only for the life of the sidecar process that issued
+        it, so never persist it. Write into it with ordinary paths under the
+        returned prefix; clean up by removing its files and then the
+        directory itself (``rm_file`` works on an empty directory).
         """
         if not self._is_remote():
-            # Scratch under the working directory, mirroring the reference
-            # driver's tmp-under-root; mkdtemp semantics either way.
-            return os.path.basename(tempfile.mkdtemp(prefix=".jetty-tmp-", dir="."))
+            # The reference driver's placement: mkdtemp(3) in the process's
+            # temporary directory, absolute path back.
+            return tempfile.mkdtemp(prefix="jetty-")
         status, data, _ = self._request("POST", f"{_MOUNT}/tmpdir")
         if status != 200:
             self._raise(status, data, "tmpdir")
@@ -306,7 +321,7 @@ class JettyFileSystem(AbstractFileSystem):
 
     def _stat(self, path: str) -> dict[str, Any]:
         if not self._is_remote():
-            st = os.stat(path or ".")
+            st = os.stat(self._local(path))
             if stat_module.S_ISREG(st.st_mode):
                 kind = "file"
             elif stat_module.S_ISDIR(st.st_mode):
@@ -371,7 +386,7 @@ class JettyFileSystem(AbstractFileSystem):
     ) -> _JettyFile:
         path = self._strip_protocol(path)
         if not self._is_remote():
-            return open(path, mode)
+            return open(self._local(path), mode)
         if mode == "rb":
             return _JettyFile(self, path, mode, self.cat_file(path))
         if mode == "wb":
