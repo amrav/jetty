@@ -39,8 +39,9 @@ pd.read_csv("jetty://reports/q3.csv",
             storage_options={"uds": "/run/jetty.sock"})
 ```
 
-Paths are relative to the module's configured root; the sidecar enforces
-containment (filesystem-v1 §3).
+Paths are relative to the module's configured root, except a scratch path
+from `gettmpdir()`, which is passed back exactly as returned; the sidecar
+enforces containment (filesystem-v1 §3).
 
 ## When the sidecar does not offer the module
 
@@ -79,9 +80,10 @@ hide a misconfigured socket.
 `gettmpdir` is this backend's extension — fsspec defines no scratch-space
 API. It has `mkdtemp(3)` semantics: each call returns a **new** private
 directory, so concurrent clients cannot collide in a shared scratch path.
-Treat the returned path as opaque: where the scratch area lives is the
-sidecar implementation's choice (the reference sidecar uses `tmp/` under
-its root, mode `0700`).
+Treat the returned path as opaque and pass it back exactly as returned: it
+is typically absolute and lies outside the served root, and it is valid
+only for the life of the sidecar process that issued it (filesystem-v1
+§5.6), so never persist it across a restart.
 
 Errors map onto Python's own: `not_found` → `FileNotFoundError`,
 `permission_denied` → `PermissionError`, `invalid_request` → `ValueError`;
