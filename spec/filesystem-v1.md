@@ -10,8 +10,9 @@ Mount: `/filesystem/v1` on the control listener
 Depends on: [SPEC.md](../SPEC.md) §1–§4, which this document does not restate.
 
 The `filesystem` module reads, writes, renames, copies, and deletes **whole
-files** under one configured root directory. It exists so an OSS binary can keep files on whatever storage
-the host actually provides — a directory on local disk against the reference
+files** under one configured root directory, and in the scratch directories
+it hands out (§5.6). It exists so an OSS binary can keep files on whatever
+storage the host actually provides — a directory on local disk against the reference
 build, whatever store a private driver fronts internally — without carrying
 mount configuration, storage credentials, or a second client library.
 
@@ -88,16 +89,26 @@ leases; watch/notify; extended attributes.
 
 ## 3. Path addressing
 
-`{path}` in §5 is the file's path **relative to the configured root**, e.g.
-`notes.txt` or `team/notes.txt`. The root is the module's entire filesystem
-authority; nothing outside it is reachable regardless of what a request asks
-for.
+`{path}` in §5 is either a **root path** or a **scratch path**.
+
+A root path is the file's path **relative to the configured root**, e.g.
+`notes.txt` or `team/notes.txt`. A scratch path is a path §5.6 returned,
+verbatim, or a path beneath one, e.g. `/tmp/jetty-k2x9a3f8/stage.parquet`.
+The root together with the scratch directories **this server process** has
+handed out is the module's entire filesystem authority; nothing outside them
+is reachable regardless of what a request asks for.
 
 An implementation **MUST** reject, with `400 invalid_request`, a path that is
-empty, absolute, longer than 4096 bytes, or that contains a backslash, a NUL,
-or an empty, `.`, or `..` segment — and **MUST** verify that the *resolved*
-path (symlinks followed) still lies under the resolved root, so a symlink
-inside the root cannot become a door out of it.
+empty, longer than 4096 bytes, or that contains a backslash, a NUL, or —
+beyond the leading `/` of an absolute path — an empty, `.`, or `..` segment.
+It **MUST** then verify that the *resolved* path (symlinks followed) lies
+under the resolved root or under the resolved form of a scratch directory
+this server process created (§5.6), and reject `400 invalid_request`
+otherwise. That one check is the whole containment story: a symlink inside
+the root cannot become a door out of it, and an absolute path is admitted
+exactly when it is a scratch path — an absolute path that is not one is
+outside the authority whatever it names, and there is no other way to
+address one.
 
 ---
 
@@ -112,7 +123,7 @@ root = "/srv/files"   # required: the servable tree
 
 | Key | Type | Required | Notes |
 |---|---|---|---|
-| `root` | string | yes | Directory whose contents are servable. A missing directory **MUST** abort boot (SPEC.md §1.2), not serve errors. A read-only root is legitimate — writes then fail per §2, which is the truth. |
+| `root` | string | yes | Directory whose contents are servable. A missing directory **MUST** abort boot (SPEC.md §1.2), not serve errors. A read-only root is legitimate — writes then fail per §2, which is the truth; scratch directories (§5.6) live outside it and keep working. |
 | `driver` | string | no, default `"local"` | This repository ships `local`. An unavailable driver name **MUST** abort boot, never serve a stand-in. |
 
 ---
@@ -213,22 +224,38 @@ directory, private to its caller by construction; this is the deliberate
 alternative to handing every client one shared scratch path and inheriting
 its collisions. The request takes no body.
 
-Where the scratch area lives is the implementation's choice. The returned
-path is an ordinary §3 path to build on, and clients **MUST** treat it as
-opaque — never predict, hard-code, or reconstruct it. The reference `local`
-driver uses `tmp/` under the root, mode `0700` as modified by the umask;
-another implementation may place scratch space anywhere in its namespace.
+A scratch directory is **not** under the root, and §3's containment does
+not apply to its creation. Where it lives is the implementation's choice —
+the reference `local` driver creates it with `mkdtemp(3)` in the process's
+temporary directory (`$TMPDIR`, else `/tmp`), mode `0700` as modified by
+the umask — and the root's own permissions have no bearing on it: a
+read-only root still hands out writable scratch space. What makes the
+directory reachable afterwards is not where it is but who made it. The
+server **MUST** remember every scratch directory it hands out, and §3 admits
+a path exactly when it resolves under the root or under one of those
+directories.
+
+The returned path is a §3 scratch path to build on — append `/name` for
+files inside it — and clients **MUST** treat it as opaque: never predict,
+hard-code, reconstruct, or persist it. It will typically be absolute, as in
+the example; that is the one place an absolute path is valid on this wire
+(§3).
 
 `200`:
 
 ```json
-{ "path": "tmp/k2x9a3f8" }
+{ "path": "/tmp/jetty-k2x9a3f8" }
 ```
 
-Nothing expires a scratch directory: cleanup is the caller's, by deleting
-its files (§5.3) and then the directory itself (empty-directory delete,
-§5.3). A deployment may of course place `root` on storage with its own
-expiry.
+A scratch directory is addressable only for the life of the server process
+that created it. After a restart the server has no memory of it, and its
+path is refused like any other path outside the root (§3), whatever is
+still on disk; a client that needs scratch space again calls this endpoint
+again. Nothing expires a scratch directory while the server runs: cleanup
+is the caller's, by deleting its files (§5.3) and then the directory itself
+(empty-directory delete, §5.3). What a caller leaves behind is an ordinary
+directory on the host, subject to whatever hygiene the host applies to its
+temporary storage and to nothing of the server's.
 
 ### 5.7 `GET /filesystem/v1/stat/{path}` — one path's metadata
 
@@ -266,7 +293,7 @@ Standard mapping:
 
 | Condition | Response |
 |---|---|
-| Path fails §3's rules or resolves outside the root; path names something other than a regular file; symlink loop; a rename that would cross a filesystem boundary; a copy of a file onto itself; a delete of a non-empty directory | `400 invalid_request` |
+| Path fails §3's rules or resolves outside both the root and every scratch directory this server process created; path names something other than a regular file; symlink loop; a rename that would cross a filesystem boundary; a copy of a file onto itself; a delete of a non-empty directory | `400 invalid_request` |
 | No file at the path, or a missing directory on the way to it | `404 not_found` |
 | Any other filesystem failure (`EIO`, `ENOSPC`, …) | `503 upstream_unavailable` |
 
@@ -275,8 +302,9 @@ Standard mapping:
 ## 7. Driver interface
 
 The surface validates the wire contract — §3's path syntax — and
-dispatches to a **driver**, which owns containment, the filesystem
-operations, and §2's semantics against its own store.
+dispatches to a **driver**, which owns containment, the record of scratch
+directories it has handed out (§5.6), the filesystem operations, and §2's
+semantics against its own store.
 
 ```python
 class FsDriver(Protocol):
@@ -285,7 +313,7 @@ class FsDriver(Protocol):
     def delete(self, path: str) -> None: ...
     def rename(self, src: str, dst: str) -> RenameResult: ...
     def copy(self, src: str, dst: str) -> WriteResult: ...
-    def mkdtemp(self) -> str: ...          # §5.6; returns the relative path
+    def mkdtemp(self) -> str: ...          # §5.6; returns the path as clients address it
     def stat(self, path: str) -> StatResult: ...       # §5.7
 ```
 
@@ -299,7 +327,7 @@ Drivers defined alongside this document:
 
 | Driver | Behaviour |
 |---|---|
-| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes; scratch directories (§5.6) under `tmp/`. Performs no network I/O. |
+| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes; scratch directories (§5.6) by `mkdtemp(3)` in the process's temporary directory, remembered for the life of the process. Performs no network I/O. |
 
 Drivers for other storage implement the same Protocol privately without
 modification to this module or its surface. Naming a driver this build does
