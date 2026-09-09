@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import socket
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -87,6 +88,10 @@ class JettyFsspecTest(absltest.TestCase):
         server.should_exit = True
         thread.join(timeout=5)
 
+    def p(self, rel: str) -> str:
+        """Wire paths are absolute (filesystem-v1 §3)."""
+        return os.path.join(self.root, rel)
+
     def disk(self, rel: str) -> bytes:
         with open(os.path.join(self.root, rel), "rb") as f:
             return f.read()
@@ -94,83 +99,84 @@ class JettyFsspecTest(absltest.TestCase):
     # --- the fsspec surface --------------------------------------------
 
     def test_pipe_and_cat_roundtrip(self):
-        self.fs.pipe_file("notes.txt", b"hello over the socket")
-        self.assertEqual(self.fs.cat_file("notes.txt"), b"hello over the socket")
+        self.fs.pipe_file(self.p("notes.txt"), b"hello over the socket")
+        self.assertEqual(self.fs.cat_file(self.p("notes.txt")), b"hello over the socket")
         self.assertEqual(self.disk("notes.txt"), b"hello over the socket")
 
     def test_cat_file_range_is_sliced_locally(self):
-        self.fs.pipe_file("r.txt", b"0123456789")
-        self.assertEqual(self.fs.cat_file("r.txt", start=2, end=5), b"234")
-        self.assertEqual(self.fs.cat_file("r.txt", start=-3), b"789")
+        self.fs.pipe_file(self.p("r.txt"), b"0123456789")
+        self.assertEqual(self.fs.cat_file(self.p("r.txt"), start=2, end=5), b"234")
+        self.assertEqual(self.fs.cat_file(self.p("r.txt"), start=-3), b"789")
 
     def test_open_text_write_then_read(self):
-        with self.fs.open("greeting.txt", "w") as f:
+        with self.fs.open(self.p("greeting.txt"), "w") as f:
             f.write("hello, text mode\n")
-        with self.fs.open("greeting.txt", "r") as f:
+        with self.fs.open(self.p("greeting.txt"), "r") as f:
             self.assertEqual(f.read(), "hello, text mode\n")
 
     def test_open_append(self):
-        self.fs.pipe_file("log.txt", b"one\n")
-        with self.fs.open("log.txt", "ab") as f:
+        self.fs.pipe_file(self.p("log.txt"), b"one\n")
+        with self.fs.open(self.p("log.txt"), "ab") as f:
             f.write(b"two\n")
-        self.assertEqual(self.fs.cat_file("log.txt"), b"one\ntwo\n")
+        self.assertEqual(self.fs.cat_file(self.p("log.txt")), b"one\ntwo\n")
 
     def test_open_exclusive_raises_when_present(self):
-        self.fs.pipe_file("taken.txt", b"x")
+        self.fs.pipe_file(self.p("taken.txt"), b"x")
         with self.assertRaises(FileExistsError):
-            self.fs.open("taken.txt", "xb")
+            self.fs.open(self.p("taken.txt"), "xb")
 
     def test_mv_is_server_side_rename(self):
-        self.fs.pipe_file("a.txt", b"cargo")
-        self.fs.mv("a.txt", "b.txt")
-        self.assertFalse(self.fs.exists("a.txt"))
-        self.assertEqual(self.fs.cat_file("b.txt"), b"cargo")
+        self.fs.pipe_file(self.p("a.txt"), b"cargo")
+        self.fs.mv(self.p("a.txt"), self.p("b.txt"))
+        self.assertFalse(self.fs.exists(self.p("a.txt")))
+        self.assertEqual(self.fs.cat_file(self.p("b.txt")), b"cargo")
 
     def test_cp_file(self):
-        self.fs.pipe_file("orig.txt", b"twin")
-        self.fs.cp_file("orig.txt", "copy.txt")
-        self.assertEqual(self.fs.cat_file("orig.txt"), b"twin")
-        self.assertEqual(self.fs.cat_file("copy.txt"), b"twin")
+        self.fs.pipe_file(self.p("orig.txt"), b"twin")
+        self.fs.cp_file(self.p("orig.txt"), self.p("copy.txt"))
+        self.assertEqual(self.fs.cat_file(self.p("orig.txt")), b"twin")
+        self.assertEqual(self.fs.cat_file(self.p("copy.txt")), b"twin")
 
     def test_rm_file(self):
-        self.fs.pipe_file("doomed.txt", b"x")
-        self.fs.rm_file("doomed.txt")
+        self.fs.pipe_file(self.p("doomed.txt"), b"x")
+        self.fs.rm_file(self.p("doomed.txt"))
         self.assertFalse(os.path.exists(os.path.join(self.root, "doomed.txt")))
 
     def test_exists(self):
-        self.assertFalse(self.fs.exists("ghost.txt"))
-        self.fs.pipe_file("real.txt", b"x")
-        self.assertTrue(self.fs.exists("real.txt"))
+        self.assertFalse(self.fs.exists(self.p("ghost.txt")))
+        self.fs.pipe_file(self.p("real.txt"), b"x")
+        self.assertTrue(self.fs.exists(self.p("real.txt")))
 
     def test_info_reports_size_without_downloading(self):
-        self.fs.pipe_file("sized.bin", b"\x00" * 1234)
-        info = self.fs.info("sized.bin")
+        self.fs.pipe_file(self.p("sized.bin"), b"\x00" * 1234)
+        info = self.fs.info(self.p("sized.bin"))
         self.assertEqual(info["size"], 1234)
         self.assertEqual(info["type"], "file")
 
     def test_ls_is_not_implemented(self):
         with self.assertRaises(NotImplementedError):
-            self.fs.ls("")
+            self.fs.ls(self.root)
 
     def test_gettmpdir_scratch_lifecycle(self):
         d = self.fs.gettmpdir()
         # The path is opaque (where scratch space lives is the sidecar's
-        # choice); all that matters is that it works as a path.
-        self.assertTrue(d)
-        self.assertFalse(d.startswith("/"), d)
+        # choice) but absolute, like every wire path; all that matters is
+        # that it works as one.
+        self.assertTrue(d.startswith("/"), d)
+        self.assertFalse(d.startswith(self.root), d)  # outside the root
         self.fs.pipe_file(f"{d}/scratch.txt", b"work")
         self.assertEqual(self.fs.cat_file(f"{d}/scratch.txt"), b"work")
         self.fs.rm_file(f"{d}/scratch.txt")
         self.fs.rm_file(d)  # empty now: rmdir(2) on the sidecar
-        self.assertFalse(os.path.exists(os.path.join(self.root, d)))
+        self.assertFalse(os.path.exists(d))
 
     def test_gettmpdir_is_fresh_each_call(self):
         self.assertNotEqual(self.fs.gettmpdir(), self.fs.gettmpdir())
 
     def test_info_carries_stat_fields(self):
-        self.fs.pipe_file("meta.bin", b"\x00" * 64)
+        self.fs.pipe_file(self.p("meta.bin"), b"\x00" * 64)
         os.chmod(os.path.join(self.root, "meta.bin"), 0o640)
-        info = self.fs.info("meta.bin")
+        info = self.fs.info(self.p("meta.bin"))
         self.assertEqual(info["size"], 64)
         self.assertEqual(info["type"], "file")
         self.assertEqual(info["mode"], "0640")
@@ -181,34 +187,42 @@ class JettyFsspecTest(absltest.TestCase):
         self.assertEqual(self.fs.info(d)["type"], "directory")
 
     def test_modified(self):
-        self.fs.pipe_file("m.txt", b"x")
-        delta = datetime.now(timezone.utc) - self.fs.modified("m.txt")
+        self.fs.pipe_file(self.p("m.txt"), b"x")
+        delta = datetime.now(timezone.utc) - self.fs.modified(self.p("m.txt"))
         self.assertLess(abs(delta.total_seconds()), 10)
 
     # --- error mapping --------------------------------------------------
 
     def test_missing_file_is_file_not_found(self):
         with self.assertRaises(FileNotFoundError):
-            self.fs.cat_file("ghost.txt")
+            self.fs.cat_file(self.p("ghost.txt"))
         with self.assertRaises(FileNotFoundError):
-            self.fs.rm_file("ghost.txt")
+            self.fs.rm_file(self.p("ghost.txt"))
         with self.assertRaises(FileNotFoundError):
-            self.fs.info("ghost.txt")
+            self.fs.info(self.p("ghost.txt"))
 
     def test_write_into_missing_directory_is_file_not_found(self):
         with self.assertRaises(FileNotFoundError):
-            self.fs.pipe_file("no/such/dir/f.txt", b"x")
+            self.fs.pipe_file(self.p("no/such/dir/f.txt"), b"x")
 
     def test_traversal_is_value_error(self):
         with self.assertRaises(ValueError):
-            self.fs.cat_file("../outside.txt")
+            self.fs.cat_file(self.p("../outside.txt"))
+
+    def test_relative_path_is_value_error(self):
+        with self.assertRaises(ValueError):
+            self.fs.cat_file("outside.txt")
+
+    def test_outside_the_root_is_value_error(self):
+        with self.assertRaises(ValueError):
+            self.fs.cat_file("/etc/hostname")
 
     @absltest.skipUnless(_NONROOT, "permission bits do not bind root")
     def test_permission_denied_is_permission_error(self):
         os.chmod(self.root, 0o555)
         self.addCleanup(os.chmod, self.root, 0o700)
         with self.assertRaises(PermissionError):
-            self.fs.pipe_file("new.txt", b"x")
+            self.fs.pipe_file(self.p("new.txt"), b"x")
 
     # --- fsspec integration --------------------------------------------
 
@@ -218,10 +232,11 @@ class JettyFsspecTest(absltest.TestCase):
 
     def test_url_open_through_fsspec(self):
         opts = {"uds": self.sock, "skip_instance_cache": True}
-        with fsspec.open("jetty://url.txt", "wb", **opts) as f:
+        # jetty:///abs/path: the third slash is the path's own.
+        with fsspec.open("jetty://" + self.p("url.txt"), "wb", **opts) as f:
             f.write(b"by url")
         self.assertEqual(self.disk("url.txt"), b"by url")
-        with fsspec.open("jetty://url.txt", "rb", **opts) as f:
+        with fsspec.open("jetty://" + self.p("url.txt"), "rb", **opts) as f:
             self.assertEqual(f.read(), b"by url")
 
 
@@ -268,48 +283,60 @@ class LocalFallbackTest(absltest.TestCase):
         server.should_exit = True
         thread.join(timeout=5)
 
+    def p(self, rel: str) -> str:
+        return os.path.join(self.base, rel)
+
     def test_operations_use_the_local_filesystem(self):
-        self.fs.pipe_file("notes.txt", b"local bytes")
-        self.assertEqual(self.fs.cat_file("notes.txt"), b"local bytes")
+        self.fs.pipe_file(self.p("notes.txt"), b"local bytes")
+        self.assertEqual(self.fs.cat_file(self.p("notes.txt")), b"local bytes")
         with open(os.path.join(self.base, "notes.txt"), "rb") as f:
             self.assertEqual(f.read(), b"local bytes")  # a plain cwd file
-        self.assertTrue(self.fs.exists("notes.txt"))
-        self.assertFalse(self.fs.exists("ghost.txt"))
-        self.assertEqual(self.fs.info("notes.txt")["type"], "file")
-        self.fs.mv("notes.txt", "renamed.txt")
+        self.assertTrue(self.fs.exists(self.p("notes.txt")))
+        self.assertFalse(self.fs.exists(self.p("ghost.txt")))
+        self.assertEqual(self.fs.info(self.p("notes.txt"))["type"], "file")
+        self.fs.mv(self.p("notes.txt"), self.p("renamed.txt"))
         self.assertFalse(os.path.exists(os.path.join(self.base, "notes.txt")))
-        self.fs.cp_file("renamed.txt", "copy.txt")
-        self.fs.rm_file("copy.txt")
+        self.fs.cp_file(self.p("renamed.txt"), self.p("copy.txt"))
+        self.fs.rm_file(self.p("copy.txt"))
         self.assertFalse(os.path.exists(os.path.join(self.base, "copy.txt")))
-        with self.fs.open("renamed.txt", "r") as f:
+        with self.fs.open(self.p("renamed.txt"), "r") as f:
             self.assertEqual(f.read(), "local bytes")
 
     def test_gettmpdir_is_local_scratch(self):
+        previous = tempfile.tempdir
+        tempfile.tempdir = self.base  # keep the suite out of the real /tmp
+        self.addCleanup(setattr, tempfile, "tempdir", previous)
         d = self.fs.gettmpdir()
-        self.assertTrue(os.path.isdir(os.path.join(self.base, d)))
+        self.assertTrue(d.startswith(self.base + os.sep), d)
+        self.assertTrue(os.path.isdir(d))
         self.fs.pipe_file(f"{d}/scratch.txt", b"work")
         self.assertEqual(self.fs.cat_file(f"{d}/scratch.txt"), b"work")
         self.fs.rm_file(f"{d}/scratch.txt")
         self.fs.rm_file(d)
-        self.assertFalse(os.path.exists(os.path.join(self.base, d)))
+        self.assertFalse(os.path.exists(d))
+
+    def test_relative_path_is_refused_for_parity(self):
+        # The sidecar would refuse it (filesystem-v1 §3); so does the fallback.
+        with self.assertRaises(ValueError):
+            self.fs.pipe_file("notes.txt", b"x")
 
     def test_ls_stays_unsupported_for_parity(self):
         # Deliberately identical to remote mode: code written against the
         # fallback must not break the day the module is enabled.
         with self.assertRaises(NotImplementedError):
-            self.fs.ls("")
+            self.fs.ls(self.base)
 
     def test_local_fallback_off_raises_loudly(self):
         strict = JettyFileSystem(
             uds=self.sock, local_fallback=False, skip_instance_cache=True
         )
         with self.assertRaisesRegex(OSError, "filesystem module"):
-            strict.cat_file("anything.txt")
+            strict.cat_file("/anything.txt")
 
     def test_unreachable_sidecar_raises_never_falls_back(self):
         lost = JettyFileSystem(uds="no-such.sock", skip_instance_cache=True)
         with self.assertRaisesRegex(OSError, "sidecar"):
-            lost.exists("anything.txt")
+            lost.exists("/anything.txt")
 
 
 if __name__ == "__main__":

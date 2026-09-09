@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
 from datetime import datetime
 
 from absl.testing import absltest
@@ -44,20 +45,34 @@ class FilesystemTestCase(absltest.TestCase):
             f.write(content)
         return path
 
-    def read(self, client, rel: str):
-        return client.get(f"/filesystem/v1/files/{rel}")
+    # Wire paths are absolute (filesystem-v1 §3). The helpers take a path
+    # relative to the root for brevity and absolutize it; one that is
+    # already absolute (a scratch path, an outsider) goes through as is.
+    def abs(self, path: str) -> str:
+        return path if path.startswith("/") else os.path.join(self.root, path)
 
-    def write(self, client, rel: str, content: bytes):
-        return client.put(f"/filesystem/v1/files/{rel}", content=content)
+    def url(self, path: str, endpoint: str = "files") -> str:
+        # "/files/" + "/abs" = "/files//abs": the literal leading-slash form.
+        return f"/filesystem/v1/{endpoint}/{self.abs(path)}"
 
-    def delete(self, client, rel: str):
-        return client.delete(f"/filesystem/v1/files/{rel}")
+    def read(self, client, path: str):
+        return client.get(self.url(path))
+
+    def write(self, client, path: str, content: bytes):
+        return client.put(self.url(path), content=content)
+
+    def delete(self, client, path: str):
+        return client.delete(self.url(path))
 
     def rename(self, client, src: str, dst: str):
-        return client.post("/filesystem/v1/rename", json={"from": src, "to": dst})
+        return client.post(
+            "/filesystem/v1/rename", json={"from": self.abs(src), "to": self.abs(dst)}
+        )
 
     def copy(self, client, src: str, dst: str):
-        return client.post("/filesystem/v1/copy", json={"from": src, "to": dst})
+        return client.post(
+            "/filesystem/v1/copy", json={"from": self.abs(src), "to": self.abs(dst)}
+        )
 
     def assert_error(self, response, status, code, retryable=False):
         """The SPEC.md §3.1 envelope, including the module's own codes."""
@@ -141,18 +156,18 @@ class ReadTest(FilesystemTestCase):
 
     def test_head_reports_size_without_body(self):
         self.seed("notes.txt", b"hello\nworld\n")
-        r = self.build().head("/filesystem/v1/files/notes.txt")
+        r = self.build().head(self.url("notes.txt"))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-length"], "12")
         self.assertEqual(r.content, b"")
 
     def test_head_missing_file_is_not_found(self):
-        r = self.build().head("/filesystem/v1/files/ghost.txt")
+        r = self.build().head(self.url("ghost.txt"))
         self.assertEqual(r.status_code, 404)
 
     def test_head_of_directory_mirrors_get(self):
         os.makedirs(os.path.join(self.root, "adir"))
-        r = self.build().head("/filesystem/v1/files/adir")
+        r = self.build().head(self.url("adir"))
         self.assertEqual(r.status_code, 400)
 
     @absltest.skipUnless(_NONROOT, "permission bits do not bind root")
@@ -163,7 +178,7 @@ class ReadTest(FilesystemTestCase):
         path = self.seed("sealed.bin", b"cannot read me")
         os.chmod(path, 0o000)
         client = self.build()
-        r = client.head("/filesystem/v1/files/sealed.bin")
+        r = client.head(self.url("sealed.bin"))
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-length"], "14")
         self.assert_error(self.read(client, "sealed.bin"), 403, "permission_denied")
@@ -267,7 +282,8 @@ class PermissionTest(FilesystemTestCase):
 
 
 class ContainmentTest(FilesystemTestCase):
-    """filesystem-v1 §3: the root is the module's entire authority."""
+    """filesystem-v1 §3: the root (plus §5.6 scratch space, tested there) is
+    the module's entire authority, and paths are absolute."""
 
     def setUp(self):
         super().setUp()
@@ -279,20 +295,46 @@ class ContainmentTest(FilesystemTestCase):
     def test_dotdot_is_invalid_request(self):
         # %2e%2e defeats client-side URL normalization; the server must still
         # refuse what arrives.
-        r = self.build().get("/filesystem/v1/files/%2e%2e/outside.txt")
+        r = self.build().get(self.url("%2e%2e/outside.txt"))
         self.assert_error(r, 400, "invalid_request")
 
-    def test_absolute_path_is_invalid_request(self):
-        # Encoded so the leading slash survives into the path parameter.
-        r = self.build().get("/filesystem/v1/files/%2Fetc%2Fhosts")
+    def test_relative_path_is_invalid_request(self):
+        # There is no root-relative form: a path that is not absolute is a
+        # syntax error before any containment question arises.
+        self.seed("notes.txt")
+        r = self.build().get("/filesystem/v1/files/notes.txt")
+        self.assert_error(r, 400, "invalid_request")
+
+    def test_absolute_path_outside_root_is_invalid_request(self):
+        # Syntactically fine; refused by containment, whatever it names.
+        r = self.build().get("/filesystem/v1/files//etc/hosts")
+        self.assert_error(r, 400, "invalid_request")
+        r = self.build().get("/filesystem/v1/files/" + self.outside)
+        self.assert_error(r, 400, "invalid_request")
+
+    def test_encoded_leading_slash_is_accepted(self):
+        # %2F is the other wire form of the leading slash (filesystem-v1 §3).
+        self.seed("notes.txt", b"either form")
+        r = self.build().get(
+            "/filesystem/v1/files/%2F" + os.path.join(self.root, "notes.txt")[1:]
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.content, b"either form")
+
+    def test_empty_segment_is_invalid_request(self):
+        r = self.build().get(self.url("a//b"))
+        self.assert_error(r, 400, "invalid_request")
+
+    def test_bare_slash_is_invalid_request(self):
+        r = self.build().get("/filesystem/v1/files//")
         self.assert_error(r, 400, "invalid_request")
 
     def test_backslash_is_invalid_request(self):
-        r = self.build().get("/filesystem/v1/files/a%5Cb")
+        r = self.build().get(self.url("a%5Cb"))
         self.assert_error(r, 400, "invalid_request")
 
     def test_dot_segment_is_invalid_request(self):
-        r = self.build().get("/filesystem/v1/files/a/%2e/b")
+        r = self.build().get(self.url("a/%2e/b"))
         self.assert_error(r, 400, "invalid_request")
 
     def test_escaping_symlink_is_invalid_request(self):
@@ -385,7 +427,7 @@ class DeleteTest(FilesystemTestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.root, "adir")))
 
     def test_traversal_is_invalid_request(self):
-        r = self.build().delete("/filesystem/v1/files/%2e%2e/x")
+        r = self.build().delete(self.url("%2e%2e/x"))
         self.assert_error(r, 400, "invalid_request")
 
     def test_through_symlink_deletes_target_not_link(self):
@@ -468,7 +510,7 @@ class RenameTest(FilesystemTestCase):
         self.seed("a.txt")
         r = self.build().post(
             "/filesystem/v1/rename",
-            json={"from": "a.txt", "to": "b.txt", "overwrite": False},
+            json={"from": self.abs("a.txt"), "to": self.abs("b.txt"), "overwrite": False},
         )
         self.assert_error(r, 400, "invalid_request")
 
@@ -528,48 +570,141 @@ class CopyTest(FilesystemTestCase):
 
 
 class TmpdirTest(FilesystemTestCase):
-    """filesystem-v1 §5.6: mkdtemp(3) under the root's scratch area."""
+    """filesystem-v1 §5.6: mkdtemp(3) outside the root, admitted by identity
+    for the life of the process."""
 
-    def tmpdir(self, client):
-        return client.post("/filesystem/v1/tmpdir")
+    def setUp(self):
+        super().setUp()
+        # The driver places scratch space in the process's temporary
+        # directory; point that at a managed directory so the suite never
+        # touches the real /tmp (and so we can watch what lands there).
+        self.scratch_parent = os.path.realpath(self.create_tempdir("scratch").full_path)
+        previous = tempfile.tempdir
+        tempfile.tempdir = self.scratch_parent
+        self.addCleanup(setattr, tempfile, "tempdir", previous)
 
-    def test_creates_a_fresh_private_directory(self):
-        self.addCleanup(os.umask, os.umask(0o022))
-        r = self.tmpdir(self.build())
+    def tmpdir(self, client) -> str:
+        r = client.post("/filesystem/v1/tmpdir")
         self.assertEqual(r.status_code, 200, r.text)
-        rel = r.json()["path"]
-        self.assertTrue(rel.startswith("tmp/"), rel)
-        full = os.path.join(self.root, rel)
-        self.assertTrue(os.path.isdir(full))
-        self.assertEqual(stat.S_IMODE(os.stat(full).st_mode), 0o700)
+        return r.json()["path"]
+
+    def test_creates_a_fresh_private_directory_outside_the_root(self):
+        self.addCleanup(os.umask, os.umask(0o022))
+        d = self.tmpdir(self.build())
+        self.assertTrue(d.startswith(self.scratch_parent + os.sep), d)
+        self.assertFalse(d.startswith(os.path.realpath(self.root)), d)
+        self.assertTrue(os.path.isdir(d))
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
 
     def test_each_call_is_distinct(self):
         client = self.build()
-        a = self.tmpdir(client).json()["path"]
-        b = self.tmpdir(client).json()["path"]
-        self.assertNotEqual(a, b)
+        self.assertNotEqual(self.tmpdir(client), self.tmpdir(client))
 
     def test_scratch_lifecycle(self):
         client = self.build()
-        rel = self.tmpdir(client).json()["path"]
+        d = self.tmpdir(client)
+        self.assertEqual(self.write(client, f"{d}/scratch.txt", b"work").status_code, 200)
+        self.assertEqual(self.read(client, f"{d}/scratch.txt").content, b"work")
         self.assertEqual(
-            self.write(client, f"{rel}/scratch.txt", b"work").status_code, 200
+            client.get(self.url(d, "stat")).json()["type"], "directory"
         )
-        self.assertEqual(self.read(client, f"{rel}/scratch.txt").content, b"work")
         # Populated: refuses to go...
-        self.assert_error(self.delete(client, rel), 400, "invalid_request")
-        # ...emptied: goes.
-        self.assertEqual(self.delete(client, f"{rel}/scratch.txt").status_code, 200)
-        r = self.delete(client, rel)
+        self.assert_error(self.delete(client, d), 400, "invalid_request")
+        # ...emptied: goes...
+        self.assertEqual(self.delete(client, f"{d}/scratch.txt").status_code, 200)
+        r = self.delete(client, d)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertFalse(os.path.exists(os.path.join(self.root, rel)))
+        self.assertFalse(os.path.exists(d))
+        # ...and is an outsider again: recreating it by hand earns nothing.
+        os.mkdir(d)
+        self.assert_error(self.write(client, f"{d}/again.txt", b"x"), 400, "invalid_request")
+
+    @absltest.skipUnless(_NONROOT, "permission bits do not bind root")
+    def test_read_only_root_still_hands_out_writable_scratch(self):
+        os.chmod(self.root, 0o555)
+        self.addCleanup(os.chmod, self.root, 0o700)
+        client = self.build()
+        self.assert_error(self.write(client, "new.txt", b"x"), 403, "permission_denied")
+        d = self.tmpdir(client)
+        self.assertEqual(self.write(client, f"{d}/stage.txt", b"x").status_code, 200)
+
+    def test_copy_from_scratch_into_root(self):
+        # The authority is the union: two-path operations may span it.
+        client = self.build()
+        d = self.tmpdir(client)
+        self.write(client, f"{d}/staged.txt", b"promoted")
+        r = self.copy(client, f"{d}/staged.txt", "final.txt")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.read(client, "final.txt").content, b"promoted")
+
+    def test_lookalike_directory_is_refused(self):
+        # Right parent, right shape, never handed out by this server.
+        fake = os.path.join(self.scratch_parent, "jetty-impostor")
+        os.mkdir(fake)
+        client = self.build()
+        self.tmpdir(client)  # the registry is not empty
+        self.assert_error(self.write(client, f"{fake}/f", b"x"), 400, "invalid_request")
+        self.assert_error(self.read(client, fake), 400, "invalid_request")
+
+    def test_forgotten_after_restart(self):
+        d = self.tmpdir(self.build())
+        with open(os.path.join(d, "left.txt"), "wb") as f:
+            f.write(b"behind")
+        reborn = self.build()  # a new process, as far as the driver knows
+        self.assert_error(self.read(reborn, f"{d}/left.txt"), 400, "invalid_request")
+        self.assert_error(self.write(reborn, f"{d}/new.txt", b"x"), 400, "invalid_request")
+
+    def test_squatted_name_is_refused(self):
+        # The directory vanishes out of band (a tmpfiles cleaner, say) and
+        # something else takes its name. Moving the original aside rather
+        # than deleting it keeps its inode allocated, so the squatter's is
+        # guaranteed different — the identity check must catch it.
+        client = self.build()
+        d = self.tmpdir(client)
+        self.write(client, f"{d}/mine.txt", b"private")
+        os.rename(d, d + ".moved")
+        os.mkdir(d)
+        self.assert_error(self.write(client, f"{d}/mine.txt", b"leak"), 400, "invalid_request")
+        self.assertEqual(os.listdir(d), [])
+        self.assert_error(self.read(client, f"{d}/mine.txt"), 400, "invalid_request")
+        # The record is gone for good: restoring the original does not revive it.
+        os.rmdir(d)
+        os.rename(d + ".moved", d)
+        self.assert_error(self.read(client, f"{d}/mine.txt"), 400, "invalid_request")
+
+    def test_symlink_at_scratch_path_is_refused(self):
+        # The remembered name now holds a symlink to somewhere outside both
+        # the root and any scratch directory: containment resolves it and
+        # refuses, and the identity check retires the record.
+        outside = os.path.dirname(self.root)
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("outside content")
+        client = self.build()
+        d = self.tmpdir(client)
+        os.rename(d, d + ".moved")
+        os.symlink(outside, d)
+        self.assert_error(self.read(client, f"{d}/secret.txt"), 400, "invalid_request")
+        self.assert_error(self.write(client, f"{d}/new.txt", b"x"), 400, "invalid_request")
+        self.assertFalse(os.path.exists(os.path.join(outside, "new.txt")))
+
+    def test_escaping_symlink_inside_scratch_is_refused(self):
+        outside = os.path.join(os.path.dirname(self.root), "outside.txt")
+        with open(outside, "w") as f:
+            f.write("out of bounds")
+        client = self.build()
+        d = self.tmpdir(client)
+        os.symlink(outside, os.path.join(d, "door"))
+        self.assert_error(self.read(client, f"{d}/door"), 400, "invalid_request")
+        self.assert_error(self.write(client, f"{d}/door", b"graffiti"), 400, "invalid_request")
+        with open(outside) as f:
+            self.assertEqual(f.read(), "out of bounds")
 
 
 class StatTest(FilesystemTestCase):
     """filesystem-v1 §5.7: stat(2) over the wire, symlinks followed."""
 
-    def stat(self, client, rel):
-        return client.get(f"/filesystem/v1/stat/{rel}")
+    def stat(self, client, path):
+        return client.get(self.url(path, "stat"))
 
     def test_regular_file(self):
         path = self.seed("notes.txt", b"hello world")
@@ -597,7 +732,7 @@ class StatTest(FilesystemTestCase):
         self.assert_error(self.stat(self.build(), "ghost"), 404, "not_found")
 
     def test_traversal_is_invalid_request(self):
-        r = self.build().get("/filesystem/v1/stat/%2e%2e/x")
+        r = self.build().get(self.url("%2e%2e/x", "stat"))
         self.assert_error(r, 400, "invalid_request")
 
     def test_follows_symlinks(self):

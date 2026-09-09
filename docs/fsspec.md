@@ -26,22 +26,22 @@ fs = fsspec.filesystem("jetty")                        # default socket
 fs = fsspec.filesystem("jetty", uds="/run/jetty.sock") # explicit socket
 fs = fsspec.filesystem("jetty", tcp="127.0.0.1:7241")  # TCP listener
 
-fs.pipe_file("notes.txt", b"hello")
-fs.cat_file("notes.txt")
-with fs.open("reports/q3.csv") as f:
+fs.pipe_file("/srv/files/notes.txt", b"hello")
+fs.cat_file("/srv/files/notes.txt")
+with fs.open("/srv/files/reports/q3.csv") as f:
     ...
 
 scratch = fs.gettmpdir()                 # fresh private dir, mkdtemp(3)
 fs.pipe_file(f"{scratch}/stage.parquet", blob)
 
-# or by URL, in any fsspec-aware library:
-pd.read_csv("jetty://reports/q3.csv",
+# or by URL, in any fsspec-aware library (note the third slash):
+pd.read_csv("jetty:///srv/files/reports/q3.csv",
             storage_options={"uds": "/run/jetty.sock"})
 ```
 
-Paths are relative to the module's configured root, except a scratch path
-from `gettmpdir()`, which is passed back exactly as returned; the sidecar
-enforces containment (filesystem-v1 §3).
+Paths are absolute, as on the sidecar's host; the sidecar admits one only
+when it resolves under the module's configured root or under a scratch
+directory that sidecar process handed out (filesystem-v1 §3).
 
 ## When the sidecar does not offer the module
 
@@ -49,9 +49,9 @@ Jetty modules are opt-in, and the filesystem module — like every module —
 is disabled unless configured. By default this backend detects that with
 one `GET /v1/meta` probe per instance (the supported discovery path,
 SPEC.md §4.2) and falls back to the **normal local filesystem**: the same
-relative `jetty://` paths resolve against the working directory with plain
-`open(2)` semantics, and `gettmpdir()` becomes a `mkdtemp` under the
-working directory. Only file access degrades; the sidecar's other modules
+absolute `jetty://` paths open directly with plain `open(2)` semantics
+(relative paths stay refused, for parity), and `gettmpdir()` becomes a
+`mkdtemp` in the process's temporary directory. Only file access degrades; the sidecar's other modules
 (e.g. `sql` over its sqlite driver) keep going through jetty untouched.
 
 Pass `local_fallback=False` to require the remote module: the backend then
@@ -81,9 +81,10 @@ hide a misconfigured socket.
 API. It has `mkdtemp(3)` semantics: each call returns a **new** private
 directory, so concurrent clients cannot collide in a shared scratch path.
 Treat the returned path as opaque and pass it back exactly as returned: it
-is typically absolute and lies outside the served root, and it is valid
-only for the life of the sidecar process that issued it (filesystem-v1
-§5.6), so never persist it across a restart.
+lies outside the served root, and it is valid only for the life of the
+sidecar process that issued it (filesystem-v1 §5.6), so never persist it
+across a restart. Any client of the same sidecar that learns the path can
+use it — fresh per call means collision-free, not access-controlled.
 
 Errors map onto Python's own: `not_found` → `FileNotFoundError`,
 `permission_denied` → `PermissionError`, `invalid_request` → `ValueError`;

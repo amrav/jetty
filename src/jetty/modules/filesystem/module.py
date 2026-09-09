@@ -99,7 +99,8 @@ class FilesystemSettings(BaseModel):
 
     enabled: bool = False
     driver: str = "local"
-    #: The servable tree; the module's entire filesystem authority. Required.
+    #: The servable tree. With the scratch directories the driver hands out
+    #: (filesystem-v1 §5.6), the module's entire filesystem authority.
     root: str
 
 
@@ -113,16 +114,17 @@ class _TwoPaths(BaseModel):
 
 
 def _check_path(path: str) -> str:
-    """filesystem-v1 §3: root-relative, no traversal, no games.
+    """filesystem-v1 §3: absolute, no traversal, no games.
 
-    Syntax only — where symlinks *lead* is the driver's containment check.
+    Syntax only — whether the path lands inside the authority (the root or
+    a live scratch directory, symlinks followed) is the driver's
+    containment check.
     """
     if (
-        not path
-        or path.startswith("/")
+        not path.startswith("/")
         or "\\" in path
         or "\x00" in path
-        or any(seg in ("", ".", "..") for seg in path.split("/"))
+        or any(seg in ("", ".", "..") for seg in path[1:].split("/"))
     ):
         raise JettyError(ErrorCode.INVALID_REQUEST, f"invalid file path {path!r}")
     if len(path.encode("utf-8")) > _MAX_PATH_BYTES:

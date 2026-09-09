@@ -61,8 +61,9 @@ leases; watch/notify; extended attributes.
   replaced file's permission bits are preserved onto it, ownership becomes
   the sidecar's own, and a hard link to the old content keeps the old
   content. A rename that cannot be atomic — the destination lies across a
-  filesystem boundary inside the root (`EXDEV`) — is refused
-  `400 invalid_request`, never degraded to copy-plus-delete.
+  filesystem boundary (`EXDEV`), inside the root or between the root and a
+  scratch directory (§5.6) — is refused `400 invalid_request`, never
+  degraded to copy-plus-delete.
 - **Directory permission governs mutation.** Because every mutation is
   link-level (`rename(2)`, `unlink(2)`), creating, replacing, renaming, and
   deleting all require write permission on the **directory**. A read-only
@@ -89,26 +90,26 @@ leases; watch/notify; extended attributes.
 
 ## 3. Path addressing
 
-`{path}` in §5 is either a **root path** or a **scratch path**.
+`{path}` in §5 is an **absolute** path on the sidecar's host, e.g.
+`/srv/files/team/notes.txt`; there is no root-relative form. The module's
+entire filesystem authority is the configured root together with the
+scratch directories **this server process** has handed out (§5.6). Nothing
+outside them is reachable regardless of what a request asks for, and which
+of the two a path lands in makes no difference to the client.
 
-A root path is the file's path **relative to the configured root**, e.g.
-`notes.txt` or `team/notes.txt`. A scratch path is a path §5.6 returned,
-verbatim, or a path beneath one, e.g. `/tmp/jetty-k2x9a3f8/stage.parquet`.
-The root together with the scratch directories **this server process** has
-handed out is the module's entire filesystem authority; nothing outside them
-is reachable regardless of what a request asks for.
+An implementation **MUST** reject, with `400 invalid_request`, a path that
+is not absolute, longer than 4096 bytes, or that contains a backslash, a
+NUL, or — beyond the leading `/` — an empty, `.`, or `..` segment. It
+**MUST** then verify that the *resolved* path (symlinks followed) lies under
+the resolved root or under a scratch directory this server process created
+and still owns (§5.6), and reject `400 invalid_request` otherwise. That one
+check is the whole containment story: a symlink inside the root or inside a
+scratch directory cannot become a door out of them, and a path that merely
+looks like a scratch path is refused like any other outsider.
 
-An implementation **MUST** reject, with `400 invalid_request`, a path that is
-empty, longer than 4096 bytes, or that contains a backslash, a NUL, or —
-beyond the leading `/` of an absolute path — an empty, `.`, or `..` segment.
-It **MUST** then verify that the *resolved* path (symlinks followed) lies
-under the resolved root or under the resolved form of a scratch directory
-this server process created (§5.6), and reject `400 invalid_request`
-otherwise. That one check is the whole containment story: a symlink inside
-the root cannot become a door out of it, and an absolute path is admitted
-exactly when it is a scratch path — an absolute path that is not one is
-outside the authority whatever it names, and there is no other way to
-address one.
+On the wire a path is percent-encoded as any URL path segment is. Its
+leading `/` may travel literally — `GET /filesystem/v1/files//srv/files/a`
+— or as `%2F`; an implementation **MUST** accept both.
 
 ---
 
@@ -164,6 +165,8 @@ file. Creation and replacement per §2.
 ```
 
 `created` is `true` iff no file existed at the path before this write.
+Into a scratch directory (§5.6) as into the root: `PUT
+/filesystem/v1/files//tmp/jetty-k2x9a3f8/stage.parquet`.
 
 ### 5.3 `DELETE /filesystem/v1/files/{path}` — delete one file
 
@@ -181,7 +184,7 @@ half of §5.6's scratch directories. A non-empty directory is
 ### 5.4 `POST /filesystem/v1/rename` — rename one file, atomically
 
 ```json
-{ "from": "drafts/report.txt", "to": "final/report.txt" }
+{ "from": "/srv/files/drafts/report.txt", "to": "/srv/files/final/report.txt" }
 ```
 
 Both fields are §3 paths. An existing destination is replaced atomically
@@ -201,7 +204,7 @@ a file onto itself is the syscall's no-op success, answered with
 ### 5.5 `POST /filesystem/v1/copy` — copy one file
 
 ```json
-{ "from": "template.ini", "to": "instance.ini" }
+{ "from": "/srv/files/template.ini", "to": "/srv/files/instance.ini" }
 ```
 
 Reads `from` whole, then writes `to` by §2's atomic path — so the
@@ -219,10 +222,10 @@ integrity. Copying a file onto itself (after symlink resolution) is
 ### 5.6 `POST /filesystem/v1/tmpdir` — a fresh scratch directory
 
 `mkdtemp(3)` semantics: creates a fresh, uniquely-named scratch directory
-and returns its path, ready for §5.2 writes. Each call returns a new
-directory, private to its caller by construction; this is the deliberate
-alternative to handing every client one shared scratch path and inheriting
-its collisions. The request takes no body.
+and returns its absolute path, ready for §5.2 writes. Each call returns a
+new directory; this is the deliberate alternative to handing every client
+one shared scratch path and inheriting its collisions. The request takes no
+body.
 
 A scratch directory is **not** under the root, and §3's containment does
 not apply to its creation. Where it lives is the implementation's choice —
@@ -235,11 +238,26 @@ server **MUST** remember every scratch directory it hands out, and §3 admits
 a path exactly when it resolves under the root or under one of those
 directories.
 
-The returned path is a §3 scratch path to build on — append `/name` for
-files inside it — and clients **MUST** treat it as opaque: never predict,
-hard-code, reconstruct, or persist it. It will typically be absolute, as in
-the example; that is the one place an absolute path is valid on this wire
-(§3).
+A remembered *name* is not enough. Scratch space is typically shared,
+world-writable storage: once the directory is gone — deleted by its caller
+(§5.3), aged out by the host's temporary-file cleaner — any local user may
+create a directory of the same name, and a server that honoured the name
+would hand that squatter every later read and write. The server **MUST**
+therefore record the directory's identity at creation (`st_dev`, `st_ino`)
+and, on every use, verify that the path still holds a real directory (not a
+symlink) with that identity, owned by the server's own effective uid; on
+any mismatch the request is `400 invalid_request` and the record is dropped
+for good. The reference driver does exactly this.
+
+Fresh per call means free of collisions, not access-controlled: the module
+has no per-client identity (SPEC.md §1.1), so any client of the same
+sidecar that learns a scratch path can use it, exactly as it can use any
+path under the root. The `0700` mode keeps the contents from *other users*
+of the host — the same protection the root's own mode bits give.
+
+The returned path is a §3 path to build on — append `/name` for files
+inside it — and clients **MUST** treat it as opaque: never predict,
+hard-code, reconstruct, or persist it.
 
 `200`:
 
@@ -247,15 +265,23 @@ the example; that is the one place an absolute path is valid on this wire
 { "path": "/tmp/jetty-k2x9a3f8" }
 ```
 
+A scratch directory usually sits on a different filesystem from the root
+(`/tmp` is often `tmpfs`), with two visible consequences. Moving a staged
+file into the root is a copy (§5.5), not a rename (§5.4), which §2 refuses
+across a boundary. And on `tmpfs` scratch content occupies memory, not
+disk; a deployment that stages large files points `TMPDIR` at storage
+sized for them.
+
 A scratch directory is addressable only for the life of the server process
 that created it. After a restart the server has no memory of it, and its
 path is refused like any other path outside the root (§3), whatever is
 still on disk; a client that needs scratch space again calls this endpoint
 again. Nothing expires a scratch directory while the server runs: cleanup
 is the caller's, by deleting its files (§5.3) and then the directory itself
-(empty-directory delete, §5.3). What a caller leaves behind is an ordinary
-directory on the host, subject to whatever hygiene the host applies to its
-temporary storage and to nothing of the server's.
+(empty-directory delete, §5.3), after which its path is an outsider again.
+What a caller leaves behind is an ordinary directory on the host, subject
+to whatever hygiene the host applies to its temporary storage and to
+nothing of the server's.
 
 ### 5.7 `GET /filesystem/v1/stat/{path}` — one path's metadata
 
@@ -313,7 +339,7 @@ class FsDriver(Protocol):
     def delete(self, path: str) -> None: ...
     def rename(self, src: str, dst: str) -> RenameResult: ...
     def copy(self, src: str, dst: str) -> WriteResult: ...
-    def mkdtemp(self) -> str: ...          # §5.6; returns the path as clients address it
+    def mkdtemp(self) -> str: ...          # §5.6; returns the absolute path
     def stat(self, path: str) -> StatResult: ...       # §5.7
 ```
 
@@ -327,7 +353,7 @@ Drivers defined alongside this document:
 
 | Driver | Behaviour |
 |---|---|
-| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes; scratch directories (§5.6) by `mkdtemp(3)` in the process's temporary directory, remembered for the life of the process. Performs no network I/O. |
+| `local` | The configured root on the local filesystem, exactly as §2 describes — temp-file-and-`rename(2)` writes, `rename(2)` renames, `unlink(2)` deletes; scratch directories (§5.6) by `mkdtemp(3)` in the process's temporary directory, remembered by identity for the life of the process. Performs no network I/O. |
 
 Drivers for other storage implement the same Protocol privately without
 modification to this module or its surface. Naming a driver this build does
