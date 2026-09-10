@@ -496,11 +496,15 @@ Beyond that: cgroup v2 mounted (any mainstream distro since ~2021), kernel
 
 Four forms: `"auto"` (kernel picks), `5173` (exact or refuse), `"5173+"`
 (prefer 5173, scan upward to the first free port), `"9000-9020"` (bounded
-scan; an exhausted range is an error). Probe sockets are held for the whole
-batch, so one launch can't hand two names the same port — and two instances
-sharing a config template with `"8000+"` naturally land on 8000 and 8001. A
-fixed port that's occupied stops `up` with exit 1 — the orchestrator never
-frees a port by killing its holder. The close-then-rebind race is accepted:
+scan; an exhausted range is an error). A port counts as free only when it
+binds on both loopback families — `127.0.0.1` and `::1` — so whatever the
+service listens on (`127.0.0.1`, `0.0.0.0`, `::1`, `::`, or `localhost`
+however it resolves) the port is clear; a host without an IPv6 loopback is
+probed on IPv4 alone. Probe sockets are held for the whole batch, so one
+launch can't hand two names the same port — and two instances sharing a
+config template with `"8000+"` naturally land on 8000 and 8001. A fixed port
+that's occupied stops `up` with exit 1 — the orchestrator never frees a port
+by killing its holder. The close-then-rebind race is accepted:
 losing it looks like a service bind failure, which the restart policy
 retries.
 

@@ -19,6 +19,7 @@ sys.path.insert(
 
 from jetty.orchestrator import procfs  # noqa: E402
 from jetty.orchestrator.config import OrchestratorConfig, start_order  # noqa: E402
+from jetty.orchestrator import ports as ports_module  # noqa: E402
 from jetty.orchestrator.ports import PortError, allocate_ports  # noqa: E402
 from jetty.orchestrator.registry import Registry, supervisor_alive  # noqa: E402
 from jetty.orchestrator.service import _stat_sig  # noqa: E402
@@ -508,10 +509,71 @@ class PortsTest(absltest.TestCase):
         got = allocate_ports({"a": f"{free}+", "b": f"{free}+"})
         self.assertNotEqual(got["a"], got["b"])
 
-    def occupy(self, port: int = 0) -> int:
-        holder = socket.socket()
+    def test_port_held_on_ipv6_loopback_is_not_free(self):
+        # A service that binds `::` (node's default) or `::1` fails on a
+        # port some other IPv6 listener holds, even though 127.0.0.1 is
+        # clear — so the broker must not call such a port free.
+        port = self.occupy(family=socket.AF_INET6)
+        with self.assertRaisesRegex(PortError, "refusing to reclaim"):
+            allocate_ports({"api": port})
+        self.assertGreater(allocate_ports({"api": f"{port}+"})["api"], port)
+
+    def test_port_held_on_ipv4_loopback_is_not_free(self):
+        port = self.occupy(family=socket.AF_INET)
+        with self.assertRaisesRegex(PortError, "refusing to reclaim"):
+            allocate_ports({"api": port})
+
+    def test_allocated_ports_bind_on_every_loopback_family(self):
+        # What the broker hands out must be bindable whichever family the
+        # service picks; "auto" and the scan forms alike.
+        for spec in ("auto", "auto", "auto", "1024+"):
+            port = allocate_ports({"x": spec})["x"]
+            for family, addr in self.loopbacks():
+                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind((addr, port))  # would raise if the family holds it
+
+    def test_auto_skips_port_held_on_ipv6(self):
+        # Pin an IPv6-only holder on an otherwise free port, then confirm
+        # "auto" never returns that port: the IPv4-side :0 pick must be
+        # confirmed on IPv6 before it counts.
+        port = self.occupy(family=socket.AF_INET6)
+        with mock.patch.object(ports_module, "_bind_one", wraps=ports_module._bind_one) as bind:
+            got = allocate_ports({"x": "auto"})["x"]
+        self.assertNotEqual(got, port)
+        # Every kernel-picked candidate was checked on the IPv6 side too.
+        families = [c.args[0] for c in bind.call_args_list]
+        self.assertIn(socket.AF_INET6, families)
+
+    def test_no_ipv6_loopback_probes_ipv4_only(self):
+        # A host without ::1 must still allocate — IPv4-only, not fail.
+        v4 = ((socket.AF_INET, "127.0.0.1"),)
+        with mock.patch.object(ports_module, "_loopbacks", return_value=v4):
+            free = allocate_ports({"x": "auto"})["x"]
+            self.assertEqual(allocate_ports({"x": free})["x"], free)
+
+    def loopbacks(self) -> tuple[tuple[socket.AddressFamily, str], ...]:
+        have = ports_module._loopbacks()
+        if len(have) < 2:
+            self.skipTest("host has no IPv6 loopback")
+        return have
+
+    def occupy(self, port: int = 0, family: socket.AddressFamily = socket.AF_INET) -> int:
+        """Hold `port` on ONE loopback family; the port is still free on
+        the other, which is exactly the state the broker must see through.
+        `port=0` first finds a port free on every family, so an IPv6-only
+        holder never lands on a port some IPv4 listener already owns."""
+        if port == 0:
+            port = allocate_ports({"_": "auto"})["_"]
+        addr = "127.0.0.1"
+        if family == socket.AF_INET6:
+            self.loopbacks()
+            addr = "::1"
+        holder = socket.socket(family, socket.SOCK_STREAM)
         self.addCleanup(holder.close)
-        holder.bind(("127.0.0.1", port))
+        if family == socket.AF_INET6:
+            holder.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        holder.bind((addr, port))
         holder.listen(1)
         return holder.getsockname()[1]
 
