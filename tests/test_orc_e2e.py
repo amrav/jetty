@@ -345,10 +345,19 @@ cmd = ["{sys.executable}", "-c", "import time; time.sleep(300)"]
         self.assertEqual(rc, 1, output)
         self.assertIn("exited 3 times", output)
         self.assertIn("kaboom", output)  # the log tail travels with the error
-        # The failed instance leaves a post-mortem registry record.
+        # The failed instance leaves a post-mortem registry record, which
+        # `ls` hides by default and `ls --all` shows as dead.
         record = self.record()
         self.assertIsNotNone(record)
         self.assertStartsWith(record["state"], "failed")
+        rc, output = self.orc_run("ls")
+        self.assertEqual(rc, 0, output)
+        self.assertNotIn("dev", output)
+        self.assertIn("no instances (1 dead instance hidden; --all shows them)", output)
+        rc, output = self.orc_run("ls", "--all")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("dev", output)
+        self.assertIn("dead (failed", output)
 
     def test_no_restart_exit_fails_immediately(self):
         config = self.write_config(
