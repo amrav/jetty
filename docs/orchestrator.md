@@ -18,7 +18,7 @@ What it gives you that a shell script of backgrounded processes doesn't:
 - **Gates.** External conditions (credentials, VPN) probed by a command. A
   service that dies while its gate is failing parks in `blocked` — no restart
   budget spent — and revives when the gate passes again.
-- **A fleet view.** `jetty-orc ls` shows every instance with health, ports,
+- **A fleet view.** `jetty-orc ls` shows every live instance with health, ports,
   process count, memory and CPU; `status` breaks one down per service.
 
 The package is deliberately standalone: stdlib + pydantic only, no
@@ -34,7 +34,7 @@ including the self-re-exec described below — keeps working.
 jetty-orc doctor                              # what this host offers
 jetty-orc check -c orchestrator.example.toml  # validate config, spawn nothing
 jetty-orc up    -c orchestrator.example.toml  # run in the foreground; Ctrl-C stops all
-jetty-orc ls                                  # every instance, from any terminal
+jetty-orc ls                                  # every live instance, from any terminal (--all adds dead ones)
 jetty-orc status <name>                       # one instance, per service
 jetty-orc ps <name>                           # full process tree, per service
 jetty-orc logs <name> [-f] [-n 50]            # prefixed service logs, tail with -f
@@ -271,7 +271,7 @@ reopening is immediate by design — slow to kill, quick to recover.
 An instance failure stops every other service in reverse dependency order
 (graceful signal → grace period → SIGKILL), prints the failing service's log
 tail, exits 1, and leaves its final registry record as a post-mortem
-(`ls` shows it until `kill <name>` clears it).
+(`ls --all` shows it until `kill <name>` clears it).
 
 After **every** exit, crash or stop, the service's whole containment group is
 swept with SIGKILL before any restart — a lingering grandchild can never hold
@@ -534,9 +534,11 @@ A record names its supervisor by pid **and** kernel start-ticks, so a
 recycled pid can't impersonate a live instance; zombies count as dead.
 `up` refuses an exact name whose record is still live (with the default
 random suffix that only happens under `--name`). `status`/`logs`/`kill`
-accept the base name when it matches exactly one instance (`logs app-dev`
-finds `app-dev-a3f1`); an ambiguous prefix is refused with the candidates
-listed. `ls` reads records plus live
+accept the base name when it matches exactly one live instance (`logs app-dev`
+finds `app-dev-a3f1`, even beside dead `app-dev-*` post-mortems); an ambiguous
+prefix is refused with the live candidates listed. Dead records answer to
+their exact name, or to a prefix when nothing live matches. `ls` lists live
+instances — dead ones are counted in a footer and shown by `ls --all` — with
 cgroup//proc stats (CPU% is sampled over ~300 ms); `kill --force` performs a
 kernel-level kill from outside (`cgroup.kill` on the instance root, or a
 session sweep under pgroup) for wedged instances.

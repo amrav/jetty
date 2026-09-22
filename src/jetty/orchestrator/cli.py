@@ -76,18 +76,26 @@ def _self_argv() -> list[str]:
 
 def _resolve_instance(registry: Registry, query: str) -> dict:
     """Exact instance name, or an unambiguous base-name prefix — so
-    `jetty-orc logs app-dev` finds `app-dev-a3f1` when it's the only one."""
+    `jetty-orc logs app-dev` finds `app-dev-a3f1` when it's the only one.
+
+    Live instances win: a prefix that matches one live instance and any
+    number of dead post-mortems resolves to the live one, and an ambiguous
+    prefix is reported against the live candidates only. Dead records are
+    reached by exact name, or by prefix when nothing live matches."""
     record = registry.load(query)
     if record is not None:
         return record
     matches = [
         r for r in registry.load_all() if r["name"].startswith(query + "-")
     ]
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        names = ", ".join(sorted(r["name"] for r in matches))
-        _fail(f"{query!r} is ambiguous: {names}", code=1)
+    live = [r for r in matches if supervisor_alive(r)]
+    candidates = live or matches
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        names = ", ".join(sorted(r["name"] for r in candidates))
+        which = "" if live else " (all dead)"
+        _fail(f"{query!r} is ambiguous{which}: {names}", code=1)
     _fail(f"no instance named {query!r}", code=1)
 
 
@@ -294,8 +302,18 @@ def _cmd_check(args: argparse.Namespace) -> None:
 def _cmd_ls(args: argparse.Namespace) -> None:
     root = Path(args.root) if args.root else default_root()
     records = Registry(root).load_all()
+    hidden = 0
+    if not args.all:
+        live = [r for r in records if supervisor_alive(r)]
+        hidden = len(records) - len(live)
+        records = live
+    hint = (
+        f"{hidden} dead instance{'s' if hidden != 1 else ''} hidden; --all shows them"
+        if hidden
+        else ""
+    )
     if not records:
-        print("no instances")
+        print(f"no instances ({hint})" if hint else "no instances")
         return
     first = {r["name"]: _instance_usage(r) for r in records}
     t0 = time.monotonic()
@@ -330,6 +348,8 @@ def _cmd_ls(args: argparse.Namespace) -> None:
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     for row in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    if hint:
+        print(f"({hint})")
 
 
 def _cmd_status(args: argparse.Namespace) -> None:
@@ -561,7 +581,11 @@ def main(argv: list[str] | None = None) -> None:
     p_check.add_argument("--config", "-c", required=True)
     p_check.set_defaults(func=_cmd_check)
 
-    p_ls = sub.add_parser("ls", help="list instances")
+    p_ls = sub.add_parser("ls", help="list live instances")
+    p_ls.add_argument(
+        "--all", "-a", action="store_true",
+        help="include dead instances (failed post-mortems, lost supervisors)",
+    )
     p_ls.set_defaults(func=_cmd_ls)
 
     p_status = sub.add_parser("status", help="per-service detail for one instance")

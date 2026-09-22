@@ -3,6 +3,8 @@ registry."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import socket
 import sys
@@ -774,6 +776,13 @@ class ServiceEnvTest(absltest.TestCase):
         self.assertNotIn("JETTY_ORC_CGROUP_ROOT", env)
 
 
+@contextlib.contextmanager
+def _captured_stderr():
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        yield buf
+
+
 class RegistryTest(absltest.TestCase):
     def test_roundtrip_and_alive(self):
         root = self.create_tempdir()
@@ -792,6 +801,49 @@ class RegistryTest(absltest.TestCase):
         self.assertFalse(supervisor_alive(loaded))
         reg.remove("dev")
         self.assertIsNone(reg.load("dev"))
+
+    def test_prefix_resolution_prefers_live_instances(self):
+        from jetty.orchestrator import cli
+
+        root = self.create_tempdir()
+        reg = Registry(Path(root.full_path))
+        live = {
+            "name": "dev-a1b2",
+            "supervisor_pid": os.getpid(),
+            "supervisor_start_ticks": procfs.start_ticks(os.getpid()),
+        }
+        dead = {"name": "dev-c3d4", "supervisor_pid": os.getpid(),
+                "supervisor_start_ticks": 1, "state": "failed"}
+        dead2 = {"name": "dev-e5f6", "supervisor_pid": None, "state": "failed"}
+        for r in (live, dead, dead2):
+            reg.write(r)
+
+        # One live match beside dead post-mortems: the live one wins.
+        self.assertEqual(cli._resolve_instance(reg, "dev")["name"], "dev-a1b2")
+        # Exact names still reach dead records (so `kill` can clear them).
+        self.assertEqual(cli._resolve_instance(reg, "dev-c3d4")["name"], "dev-c3d4")
+
+        # Two live matches: ambiguous, and the dead ones are not suggested.
+        live2 = dict(live, name="dev-b2c3")
+        reg.write(live2)
+        with self.assertRaises(SystemExit) as cm:
+            with _captured_stderr() as err:
+                cli._resolve_instance(reg, "dev")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("dev-a1b2, dev-b2c3", err.getvalue())
+        self.assertNotIn("dev-c3d4", err.getvalue())
+        self.assertNotIn("dev-e5f6", err.getvalue())
+
+        # Nothing live: a lone dead match resolves, several are ambiguous.
+        reg.remove("dev-a1b2")
+        reg.remove("dev-b2c3")
+        with self.assertRaises(SystemExit):
+            with _captured_stderr() as err:
+                cli._resolve_instance(reg, "dev")
+        self.assertIn("all dead", err.getvalue())
+        self.assertIn("dev-c3d4, dev-e5f6", err.getvalue())
+        reg.remove("dev-e5f6")
+        self.assertEqual(cli._resolve_instance(reg, "dev")["name"], "dev-c3d4")
 
 
 class WatchSignatureTest(absltest.TestCase):
