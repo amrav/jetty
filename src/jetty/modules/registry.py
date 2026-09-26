@@ -134,6 +134,13 @@ def _register_builtins() -> None:
 
     register("llmproxy", _llmproxy)
 
+    def _functions(settings: Mapping[str, Any]) -> Module:
+        from jetty.modules.functions.module import FunctionsModule
+
+        return FunctionsModule(settings)
+
+    register("functions", _functions)
+
     # `auth` is specified in spec/ and not yet implemented. It is deliberately
     # NOT registered: naming it here before it exists would let `enabled =
     # true` boot a sidecar that answers auth questions with a stub. Until the

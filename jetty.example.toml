@@ -151,3 +151,21 @@ enabled = true
 #   enabled = true
 #   driver = "local"
 #   root = "/srv/files"
+
+# Named functions with opaque request and response payloads over a pluggable
+# driver (spec/functions-v1.md — experimental). A staging area: an
+# application defines a function in its own spec and calls it here before
+# any jetty module models the capability; jetty never interprets the bytes.
+# This build ships the `exec` driver — one command per function, request
+# payload on stdin, response payload on stdout, non-zero exit is a 502. A
+# driver shipped as a library is named by import path instead
+# (`driver = "some_package.module:factory"`) and reads its own keys from
+# this table. Commands are machine-specific, hence disabled here.
+#
+#   [modules.functions]
+#   enabled = true
+#   driver = "exec"
+#
+#   [modules.functions.exec."planner.next_slot"]
+#   command = ["/srv/hooks/planner-next-slot.py"]
+#   timeout_s = 30

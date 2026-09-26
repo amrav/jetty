@@ -166,6 +166,42 @@ may build on.
 implementation that "helpfully" normalised or synthesised sender values would
 quietly defeat any policy keyed on them.
 
+## Functions: the status is Jetty's layer, the bytes are the application's
+
+The `functions` module exists so an application can call something its own
+spec defines before any Jetty module models it. Jetty cannot know what the
+payload means, so it does not try: no content type, no schema, no error
+format inside the bytes.
+
+The one place that discipline could leak is the HTTP status. Letting the
+driver set it would make the module a generic reverse proxy and make the
+error envelope ambiguous — a `404` could then mean "no such function" or
+"the function looked something up and found nothing", and a client could
+not tell which without knowing the function. So a function that ran and
+answered is always `200`, and every non-2xx means something about Jetty or
+its driver. A function's own failure vocabulary lives inside its payload,
+where the application's spec owns it.
+
+`unknown_function` is its own code rather than `not_found` because clients
+feature-detect on it, and `GET /functions/v1/list` exists for the same
+reason `/v1/meta` does: finding a missing capability at startup beats
+finding it mid-request.
+
+The `exec` driver is what makes the module useful outside an internal
+build: a function is a program in any language, named in config. A missing
+executable fails boot rather than every call, and the payload never touches
+the log — the child's stderr does, because it is the author's own debugging
+channel and the author controls what goes in it.
+
+Unlike the other modules, the driver here is selectable without editing
+this repository — by registered name, or by a `package.module:factory`
+import path in config. The module is a staging area for capabilities that
+change often, and the build that backs them with a real library should not
+have to carry a patch to this file for each one. The trade is that config
+can now name code to import; that is the same authority the operator
+already holds over the `exec` command table, and the sidecar's config is
+the operator's.
+
 ## Implementation notes
 
 Two behaviours in the reference implementation exist because of specific
