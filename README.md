@@ -36,6 +36,7 @@ details stay internal.
 | `issuetracker` module ([`spec/issuetracker-v1.md`](spec/issuetracker-v1.md)) — emulated Google Issue Tracker API (**experimental**) | **Implemented, tested** (`mock` driver; `passthrough` specified only) |
 | `mail` module ([`spec/mail-v1.md`](spec/mail-v1.md)) — outbound mail relay | **Implemented, tested** (`spool` driver; delivery drivers are private) |
 | `filesystem` module ([`spec/filesystem-v1.md`](spec/filesystem-v1.md)) — whole-file read/write/rename/copy/delete/stat with unix semantics (**experimental**) | **Implemented, tested** (`local` driver; drivers for other storage are private) |
+| `functions` module ([`spec/functions-v1.md`](spec/functions-v1.md)) — named functions with opaque byte payloads, a staging area for capabilities no module models yet (**experimental**) | **Implemented, tested** (`exec` driver: one command per function; a library driver plugs in by registered name or `package.module:factory` path) |
 | `xmanager` | Name reserved only |
 | `jetty.fsspec` ([docs](docs/fsspec.md)) — Python client: [fsspec](https://filesystem-spec.readthedocs.io/) backend for the `filesystem` module (`pip install jetty[fsspec]`) | **Implemented, tested** |
 | Orchestrator `jetty-orc` ([`docs/orchestrator.md`](docs/orchestrator.md)) — companion tool, not a module | **Implemented, tested** |

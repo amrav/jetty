@@ -282,6 +282,7 @@ Modules defined alongside this document:
 | `mail` | `spec/mail-v1.md` | Outbound mail relay over a pluggable driver |
 | `sql` | `spec/sql-v1.md` | Relational storage in the GoogleSQL ∩ SQLite dialect over a pluggable driver (experimental: breaking changes without warning) |
 | `filesystem` | `spec/filesystem-v1.md` | Whole-file operations (read, write, rename, copy, delete, stat) with unix semantics, by absolute path, confined to a configured root plus server-issued scratch directories, over a pluggable driver (experimental: breaking changes without warning) |
+| `functions` | `spec/functions-v1.md` | Named functions with opaque request and response payloads, over a pluggable driver, for capabilities an application's own specification defines before any module models them (experimental: breaking changes without warning) |
 
 `xmanager` is a reserved name with no specification yet.
 
